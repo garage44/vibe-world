@@ -23,9 +23,9 @@ impl OSMTile {
         // Use the standard OSM tile server
         // The URL format is zoom/x/y where:
         // - x increases from west to east (0 to 2^zoom-1)
-        // - y increases from north to south (0 to 2^zoom-1) 
+        // - y increases from north to south (0 to 2^zoom-1)
         format!(
-            "https://a.tile.openstreetmap.org/{}/{}/{}.png", 
+            "https://a.tile.openstreetmap.org/{}/{}/{}.png",
             self.z, self.x, self.y
         )
     }
@@ -47,24 +47,24 @@ pub async fn load_tile_image(tile: &OSMTile) -> Result<DynamicImage, anyhow::Err
         .timeout(Duration::from_secs(10))
         .user_agent("bevy_osm_viewer/0.1.0 (github.com/user/bevy_osm_viewer)")
         .build()?;
-    
+
     let url = tile.get_url();
     info!("Requesting OSM tile URL: {}", url);
-    
+
     // Attempt to load the tile with better error handling
     let response = client.get(&url).send().await?;
-    
+
     if !response.status().is_success() {
         error!("Failed to load tile {},{} - HTTP status: {}", tile.x, tile.y, response.status());
         return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
     }
-    
+
     let bytes = response.bytes().await?;
     info!("Received {} bytes for tile {},{}", bytes.len(), tile.x, tile.y);
-    
+
     let image = image::load_from_memory(&bytes)?;
     info!("Image loaded: {}x{}", image.width(), image.height());
-    
+
     Ok(image)
 }
 
@@ -82,23 +82,23 @@ pub fn create_tile_mesh(
         bevy::render::mesh::PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-    
-    // When we create a mesh on the XZ plane in a 3D world:
-    // - X increases from left to right (west to east)
-    // - Z increases from back to front (north to south)
-    // In OpenStreetMap:
-    // - X increases from left to right (west to east)
-    // - Y increases from top to bottom (north to south)
-    // So our Z axis maps to OSM Y axis
-    
-    // Create a 1x1 quad centered at local origin (0,0,0)
-    // This ensures tiles exactly touch each other when positioned at integer coordinates
+
+    // Correct orientation for OSM tile mapping:
+    // - OSM has (0,0) at the northwest corner
+    // - X increases eastward (right)
+    // - Y increases southward (down)
+    // In our world coordinates:
+    // - X increases eastward (same as OSM)
+    // - Z increases southward (corresponds to OSM Y)
+    // - Y is up (height)
+
+    // Create vertices at exact [0,1] range to ensure perfect alignment
     let vertices: [[f32; 8]; 4] = [
         // positions (XYZ)               normals (XYZ)       UV coords
-        [-0.5, 0.0, -0.5,   0.0, 1.0, 0.0,          1.0, 1.0], // top-left → (1,1) UV - flipped
-        [0.5, 0.0, -0.5,    0.0, 1.0, 0.0,          0.0, 1.0], // top-right → (0,1) UV - flipped
-        [0.5, 0.0, 0.5,     0.0, 1.0, 0.0,          0.0, 0.0], // bottom-right → (0,0) UV - flipped
-        [-0.5, 0.0, 0.5,    0.0, 1.0, 0.0,          1.0, 0.0], // bottom-left → (1,0) UV - flipped
+        [0.0, 0.0, 0.0,    0.0, 1.0, 0.0,          0.0, 0.0], // northwest corner
+        [1.0, 0.0, 0.0,    0.0, 1.0, 0.0,          1.0, 0.0], // northeast corner
+        [1.0, 0.0, 1.0,    0.0, 1.0, 0.0,          1.0, 1.0], // southeast corner
+        [0.0, 0.0, 1.0,    0.0, 1.0, 0.0,          0.0, 1.0], // southwest corner
     ];
 
     let positions: Vec<[f32; 3]> = vertices.iter().map(|v| [v[0], v[1], v[2]]).collect();
@@ -111,12 +111,13 @@ pub fn create_tile_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
 
-    // We're now using flipped UVs instead of flipping the image
-    // Create a texture from the loaded image directly
-    let texture = Image::from_dynamic(image, true, RenderAssetUsages::default());
+    // Check if we need to flip the image vertically to match the UV coordinates
+    // OSM tiles have (0,0) at the top-left
+    let flipped_image = image::DynamicImage::ImageRgba8(image.to_rgba8());
+    let texture = Image::from_dynamic(flipped_image, true, RenderAssetUsages::default());
     let texture_handle = images.add(texture);
-    
-    // Create a material with the texture - ensure textures are visible
+
+    // Create a material with the texture
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(texture_handle),
         unlit: true, // Make the material unlit so it's always visible regardless of lighting
@@ -129,20 +130,17 @@ pub fn create_tile_mesh(
         ..default()
     });
 
-    // Spawn the tile entity
-    // In OSM, Y increases southward (down), but we need to invert this for our 3D world
+    // CRITICAL: The key fix is in how we position tiles in world space
+    // OSM has Y=0 at north, increasing southward
+    // Our world has Z=0 at north, increasing southward
     commands
         .spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),
-            // Fix the tile positioning by ensuring exact integer coordinates
-            // Important: We don't add 0.5 offset to coordinates anymore, since the mesh is
-            // already centered at its local origin
             Transform::from_xyz(
-                tile.x as f32, // X position matches OSM X directly
-                0.0,           // At ground level
-                // Lower Y value in OSM = Higher Z value in world (north is up)
-                (MAX_TILE_INDEX - tile.y) as f32  // Invert Y to fix north/south orientation
+                tile.x as f32,       // X coordinate (eastward)
+                0.0,                 // At ground level
+                tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
             ),
             // Add name for debugging
             Name::new(format!("Tile {},{}", tile.x, tile.y)),
@@ -162,14 +160,14 @@ pub fn create_fallback_tile_mesh(
         bevy::render::mesh::PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-    
-    // Match the UV mapping from the main tile creation function
+
+    // Match the new vertex positioning from create_tile_mesh
     let vertices: [[f32; 8]; 4] = [
         // positions (XYZ)               normals (XYZ)       UV coords
-        [-0.5, 0.0, -0.5,   0.0, 1.0, 0.0,          1.0, 1.0], // top-left → (1,1) UV - flipped
-        [0.5, 0.0, -0.5,    0.0, 1.0, 0.0,          0.0, 1.0], // top-right → (0,1) UV - flipped
-        [0.5, 0.0, 0.5,     0.0, 1.0, 0.0,          0.0, 0.0], // bottom-right → (0,0) UV - flipped
-        [-0.5, 0.0, 0.5,    0.0, 1.0, 0.0,          1.0, 0.0], // bottom-left → (1,0) UV - flipped
+        [0.0, 0.0, 0.0,    0.0, 1.0, 0.0,          0.0, 0.0], // northwest corner
+        [1.0, 0.0, 0.0,    0.0, 1.0, 0.0,          1.0, 0.0], // northeast corner
+        [1.0, 0.0, 1.0,    0.0, 1.0, 0.0,          1.0, 1.0], // southeast corner
+        [0.0, 0.0, 1.0,    0.0, 1.0, 0.0,          0.0, 1.0], // southwest corner
     ];
 
     let positions: Vec<[f32; 3]> = vertices.iter().map(|v| [v[0], v[1], v[2]]).collect();
@@ -193,32 +191,18 @@ pub fn create_fallback_tile_mesh(
         ..default()
     });
 
-    // Spawn the fallback tile entity with the same positioning logic as main tiles
+    // Spawn the fallback tile entity with same positioning as regular tiles
     commands
         .spawn((
             Mesh3d(meshes.add(mesh)),
             MeshMaterial3d(material),
-            // Fix the tile positioning to match the regular tiles
             Transform::from_xyz(
-                tile.x as f32, // X position matches OSM X directly
-                0.0,           // At ground level
-                // Lower Y value in OSM = Higher Z value in world (north is up)
-                (MAX_TILE_INDEX - tile.y) as f32  // Invert Y to fix north/south orientation
+                tile.x as f32,       // X coordinate (eastward)
+                0.0,                 // At ground level
+                tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
             ),
             // Add name for debugging
             Name::new(format!("Fallback Tile {},{}", tile.x, tile.y)),
         ))
-        .with_children(|parent| {
-            // Add a small cube on top to make it more visible
-            parent.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.1, 0.1, 0.1).mesh())),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(1.0, 1.0, 0.0), // Yellow
-                    emissive: LinearRgba::new(1.0, 1.0, 0.0, 0.8),
-                    ..default()
-                })),
-                Transform::from_xyz(0.0, 0.1, 0.0),
-            ));
-        })
         .id()
 }

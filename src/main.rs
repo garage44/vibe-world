@@ -37,7 +37,7 @@ struct MouseLookState {
 fn main() {
     // Create the Tokio runtime
     let runtime = Runtime::new().expect("Failed to create Tokio runtime");
-    
+
     App::new()
         .add_plugins(DefaultPlugins)
         .insert_resource(OSMData {
@@ -57,21 +57,22 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Calculate world coordinates for Groningen
-    // Since we're using the inverted Y coordinate system in the OSM tiles,
-    // we need to calculate the proper Z value using MAX_TILE_INDEX - Y
+    // Calculate world coordinates for Groningen location
+    // With our new coordinate system:
+    // - X = OSM tile X (increasing eastward)
+    // - Z = OSM tile Y (increasing southward)
     let world_x = GRONINGEN_X as f32;
-    let world_z = (MAX_TILE_INDEX - GRONINGEN_Y) as f32;
+    let world_z = GRONINGEN_Y as f32;  // Direct mapping now, no need to invert
 
     // Camera - positioned slightly elevated with a first-person view
     // Position at Groningen coordinates
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(world_x, 3.0, world_z) // Raised camera height for better overview
+        Transform::from_xyz(world_x, 5.0, world_z) // Raised camera height for better overview
             .looking_at(Vec3::new(world_x, 0.0, world_z), Vec3::Y),
     ));
 
-    // Main light - directional to simulate sunlight 
+    // Main light - directional to simulate sunlight
     commands.spawn((
         DirectionalLight {
             illuminance: 10000.0,
@@ -80,60 +81,28 @@ fn setup(
         },
         Transform::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    
+
     // Add ambient light for better visibility
     commands.insert_resource(AmbientLight {
         color: Color::WHITE,
         brightness: 0.5,
     });
-    
-    // Add a ground plane for reference - now larger for horizon effect
+
+    // Add a ground plane for reference
     commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(100.0, 100.0))),
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(1000.0, 1000.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.3, 0.3, 0.3),
             perceptual_roughness: 0.9,
             ..default()
         })),
-        Transform::from_xyz(0.0, -0.01, 0.0), // Just slightly below tiles
+        Transform::from_xyz(world_x, -0.01, world_z), // Position at camera center
     ));
-    
-    // Tone down the coordinate axes
-    let axis_length = 2.0;
-    let axis_thickness = 0.05;
-    
-    // X axis (red)
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(axis_length, axis_thickness, axis_thickness).mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.0, 0.0), // Red 
-            emissive: LinearRgba::new(1.0, 0.0, 0.0, 1.0),
-            ..default()
-        })),
-        Transform::from_xyz(axis_length / 2.0, 0.0, 0.0),
-    ));
-    
-    // Y axis (green)
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(axis_thickness, axis_length, axis_thickness).mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.0, 1.0, 0.0), // Green
-            emissive: LinearRgba::new(0.0, 1.0, 0.0, 1.0),
-            ..default()
-        })),
-        Transform::from_xyz(0.0, axis_length / 2.0, 0.0),
-    ));
-    
-    // Z axis (blue)
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(axis_thickness, axis_thickness, axis_length).mesh())),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.0, 0.0, 1.0), // Blue
-            emissive: LinearRgba::new(0.0, 0.0, 1.0, 1.0),
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, axis_length / 2.0),
-    ));
+
+    // Log current position for debugging (console only)
+    info!("Starting at world position: ({}, {})", world_x, world_z);
+    info!("Corresponding to OSM tile: ({}, {})", GRONINGEN_X, GRONINGEN_Y);
+    info!("Zoom level: {}, MAX_TILE_INDEX: {}", ZOOM_LEVEL, MAX_TILE_INDEX);
 }
 
 // System to capture mouse movement for camera look
@@ -156,35 +125,35 @@ fn camera_movement(
     let movement_speed = 5.0;
     let look_sensitivity = 0.002;
     let delta = time.delta_secs();
-    
+
     // Apply mouse motion to update camera rotation (looking around)
     if !mouse_look_state.mouse_motion.is_nan() && mouse_look_state.mouse_motion.length_squared() > 0.0 {
         // Update pitch and yaw based on mouse motion
         mouse_look_state.yaw -= mouse_look_state.mouse_motion.x * look_sensitivity;
         mouse_look_state.pitch -= mouse_look_state.mouse_motion.y * look_sensitivity;
-        
+
         // Clamp pitch to prevent the camera from flipping
         mouse_look_state.pitch = mouse_look_state.pitch.clamp(-1.5, 1.5);
-        
+
         // Reset motion for next frame
         mouse_look_state.mouse_motion = Vec2::ZERO;
     }
-    
+
     // Apply rotation to camera transform
     let mut transform = query.single_mut();
-    
+
     // Create rotation quaternion from pitch and yaw
     let yaw_rotation = Quat::from_rotation_y(mouse_look_state.yaw);
     let pitch_rotation = Quat::from_rotation_x(mouse_look_state.pitch);
-    
+
     // Combine rotations and set the camera's rotation
     transform.rotation = yaw_rotation * pitch_rotation;
-    
+
     // Calculate movement direction based on camera orientation
     let forward = *transform.forward();
     let right = *transform.right();
     let mut movement = Vec3::ZERO;
-    
+
     // Apply movement based on key input (relative to camera direction)
     if keyboard_input.pressed(KeyCode::KeyW) {
         movement += forward;
@@ -198,7 +167,7 @@ fn camera_movement(
     if keyboard_input.pressed(KeyCode::KeyD) {
         movement += right;
     }
-    
+
     // Apply up/down movement
     if keyboard_input.pressed(KeyCode::Space) {
         movement.y += 1.0;
@@ -206,12 +175,12 @@ fn camera_movement(
     if keyboard_input.pressed(KeyCode::ShiftLeft) {
         movement.y -= 1.0;
     }
-    
+
     // Normalize movement vector if it's not zero
     if movement != Vec3::ZERO {
         movement = movement.normalize();
     }
-    
+
     // Apply movement to position
     transform.translation += movement * movement_speed * delta;
 }
@@ -226,41 +195,45 @@ fn debug_info(
         let tile_count = osm_data.tiles.len();
         let pending_count = osm_data.pending_tiles.lock().len();
         let loaded_count = osm_data.loaded_tiles.len();
-        
+
         if let Ok(camera_transform) = camera_query.get_single() {
             let pos = camera_transform.translation;
             info!("Camera position: {:?}", pos);
-            
+
             // Show which tile we're currently over
             let (tile_x, tile_y) = world_to_tile_coords(pos.x, pos.z);
             info!("Current tile: {}, {} at zoom {}", tile_x, tile_y, ZOOM_LEVEL);
         }
-        
+
         // Print some info about loaded tiles if we have any
         if tile_count > 0 {
             let sample_tiles = osm_data.tiles.iter().take(3).collect::<Vec<_>>();
             info!("Sample tiles: {:?}", sample_tiles.iter().map(|(x, y, _)| (*x, *y)).collect::<Vec<_>>());
         }
-        
-        info!("Tiles: {} loaded, {} pending, {} created", 
+
+        info!("Tiles: {} loaded, {} pending, {} created",
             loaded_count, pending_count, tile_count);
     }
 }
 
 // Convert camera world coordinates to OSM tile coordinates
 fn world_to_tile_coords(x: f32, z: f32) -> (u32, u32) {
-    // Convert from world coordinates to OSM tile indices
-    // In OSM, X increases from west to east, Y increases from north to south
-    // In our 3D world, X increases west to east, Z increases south to north (inverted)
+    // OSM tile coordinate system has (0,0) at northwest corner
+    // X increases eastward, Y increases southward
+    // Our world coordinate system has:
+    // - X increases eastward (same as OSM X)
+    // - Z increases southward (maps directly to OSM Y)
+
+    // Get the tile X coordinate (same axis direction in both systems)
     let tile_x = x.floor() as u32;
-    
-    // We need to invert Z because we inverted the positioning in tile creation
-    let tile_y = (MAX_TILE_INDEX as f32 - z).floor() as u32;
-    
+
+    // Get the tile Y coordinate (Z in world space maps directly to Y in OSM)
+    let tile_y = z.floor() as u32;
+
     // Clamp to valid tile range
     let tile_x = tile_x.clamp(0, MAX_TILE_INDEX);
     let tile_y = tile_y.clamp(0, MAX_TILE_INDEX);
-    
+
     (tile_x, tile_y)
 }
 
@@ -273,31 +246,31 @@ fn process_tiles(
     if let Ok(camera_transform) = camera_query.get_single() {
         let camera_x = camera_transform.translation.x;
         let camera_z = camera_transform.translation.z;
-        
+
         let (center_tile_x, center_tile_y) = world_to_tile_coords(camera_x, camera_z);
-        
+
         // Calculate visible tile range - increased for better coverage
         let visible_range = 3;
-        
+
         for x_offset in -visible_range..=visible_range {
             for y_offset in -visible_range..=visible_range {
                 let tile_x = (center_tile_x as i32 + x_offset).clamp(0, MAX_TILE_INDEX as i32) as u32;
                 let tile_y = (center_tile_y as i32 + y_offset).clamp(0, MAX_TILE_INDEX as i32) as u32;
-                
+
                 // Check if tile is already loaded or pending
-                if !osm_data.loaded_tiles.contains(&(tile_x, tile_y)) && 
+                if !osm_data.loaded_tiles.contains(&(tile_x, tile_y)) &&
                    !osm_data.pending_tiles.lock().iter().any(|(x, y, _)| *x == tile_x && *y == tile_y) {
-                    
+
                     // Mark as loaded to prevent duplicate requests
                     osm_data.loaded_tiles.push((tile_x, tile_y));
-                    
+
                     // Clone the pending_tiles for the async task
                     let pending_tiles = osm_data.pending_tiles.clone();
                     let tile = OSMTile::new(tile_x, tile_y, ZOOM_LEVEL);
-                    
+
                     // Log what we're loading
                     info!("Loading tile: {}, {}", tile_x, tile_y);
-                    
+
                     // Spawn async task to load the tile image using the Tokio runtime
                     tokio_runtime.0.spawn(async move {
                         match load_tile_image(&tile).await {
@@ -333,7 +306,7 @@ fn apply_pending_tiles(
     // Process each pending tile
     for (x, y, image_opt) in pending_tiles {
         let tile = OSMTile::new(x, y, ZOOM_LEVEL);
-        
+
         // Create entity with either the loaded image or a fallback
         let entity = match image_opt {
             Some(image) => {
@@ -357,7 +330,7 @@ fn apply_pending_tiles(
                 )
             }
         };
-        
+
         // Store the entity
         osm_data.tiles.push((x, y, entity));
     }
