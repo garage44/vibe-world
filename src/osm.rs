@@ -3,10 +3,13 @@ use bevy::render::render_asset::RenderAssetUsages;
 use image::DynamicImage;
 use reqwest::Client;
 use std::time::Duration;
-use crate::MAX_TILE_INDEX;
+use std::path::{Path, PathBuf};
+use std::fs;
+use std::io;
 
 // Constants for the OSM tile system
 const TILE_SIZE: usize = 256; // Standard OSM tile size in pixels
+const CACHE_DIR: &str = "tile_cache"; // Directory for caching tiles
 
 pub struct OSMTile {
     pub x: u32,
@@ -29,6 +32,19 @@ impl OSMTile {
             self.z, self.x, self.y
         )
     }
+
+    // Get cache file path for this tile
+    pub fn get_cache_path(&self) -> PathBuf {
+        let cache_path = Path::new(CACHE_DIR)
+            .join(self.z.to_string())
+            .join(self.x.to_string());
+
+        fs::create_dir_all(&cache_path).unwrap_or_else(|e| {
+            warn!("Failed to create cache directory: {}", e);
+        });
+
+        cache_path.join(format!("{}.png", self.y))
+    }
 }
 
 impl Clone for OSMTile {
@@ -41,7 +57,56 @@ impl Clone for OSMTile {
     }
 }
 
+// Initialize the tile cache system
+pub fn init_tile_cache() -> io::Result<()> {
+    let cache_dir = Path::new(CACHE_DIR);
+    if !cache_dir.exists() {
+        fs::create_dir_all(cache_dir)?;
+        info!("Created tile cache directory: {}", cache_dir.display());
+    }
+    Ok(())
+}
+
+// Try to load a tile from the cache
+pub fn load_tile_from_cache(tile: &OSMTile) -> Option<DynamicImage> {
+    let cache_path = tile.get_cache_path();
+
+    if cache_path.exists() {
+        match image::open(&cache_path) {
+            Ok(img) => {
+                info!("Loaded tile {},{},{} from cache", tile.x, tile.y, tile.z);
+                return Some(img);
+            },
+            Err(e) => {
+                warn!("Failed to load cached tile: {}", e);
+                // Try to remove corrupt cache file
+                let _ = fs::remove_file(&cache_path);
+            }
+        }
+    }
+
+    None
+}
+
+// Save a tile to the cache
+pub fn save_tile_to_cache(tile: &OSMTile, image: &DynamicImage) {
+    let cache_path = tile.get_cache_path();
+
+    match image.save(&cache_path) {
+        Ok(_) => info!("Saved tile {},{},{} to cache", tile.x, tile.y, tile.z),
+        Err(e) => warn!("Failed to cache tile: {}", e),
+    }
+}
+
 pub async fn load_tile_image(tile: &OSMTile) -> Result<DynamicImage, anyhow::Error> {
+    // First try loading from cache
+    if let Some(cached_image) = load_tile_from_cache(tile) {
+        return Ok(cached_image);
+    }
+
+    // If not in cache, fetch from network
+    info!("Tile not in cache, fetching from network: {},{},{}", tile.x, tile.y, tile.z);
+
     // Create a client with proper user agent and timeout
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
@@ -64,6 +129,9 @@ pub async fn load_tile_image(tile: &OSMTile) -> Result<DynamicImage, anyhow::Err
 
     let image = image::load_from_memory(&bytes)?;
     info!("Image loaded: {}x{}", image.width(), image.height());
+
+    // Save to cache
+    save_tile_to_cache(tile, &image);
 
     Ok(image)
 }
@@ -130,9 +198,9 @@ pub fn create_tile_mesh(
         ..default()
     });
 
-    // CRITICAL: The key fix is in how we position tiles in world space
-    // OSM has Y=0 at north, increasing southward
-    // Our world has Z=0 at north, increasing southward
+    // Position tiles according to their OSM coordinates
+    // We need to adjust based on zoom level - at each higher zoom level,
+    // the tiles are half the size of the previous level
     commands
         .spawn((
             Mesh3d(meshes.add(mesh)),
@@ -143,7 +211,7 @@ pub fn create_tile_mesh(
                 tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
             ),
             // Add name for debugging
-            Name::new(format!("Tile {},{}", tile.x, tile.y)),
+            Name::new(format!("Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
         ))
         .id()
 }
@@ -202,7 +270,7 @@ pub fn create_fallback_tile_mesh(
                 tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
             ),
             // Add name for debugging
-            Name::new(format!("Fallback Tile {},{}", tile.x, tile.y)),
+            Name::new(format!("Fallback Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
         ))
         .id()
 }
