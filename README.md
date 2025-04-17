@@ -1,6 +1,7 @@
 # Vibers
 A vibe-coding experiment to build an AR world on top of Rust & Bevy.
 
+## Setup 
 ```bash
 distrobox create -i archlinux:base --additional-flags "--volume=/tmp/.X11-unix:/tmp/.X11-unix:rw --volume=/run/user/$(id -u):/run/user/$(id -u):rw"
 distrobox create -i archlinux:base --additional-flags "--volume=/tmp/.X11-unix:/tmp/.X11-unix:rw"

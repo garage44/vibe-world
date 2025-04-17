@@ -1,8 +1,6 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
 use crate::resources::MouseLookState;
-use crate::utils::coordinate_conversion::world_to_tile_coords;
-use crate::resources::constants::DEFAULT_ZOOM_LEVEL;
 
 /// System to capture mouse movement for camera look
 pub fn mouse_look_system(

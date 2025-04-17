@@ -1,11 +1,12 @@
 use bevy::prelude::*;
 use crate::resources::constants::{DEFAULT_ZOOM_LEVEL, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL, GRONINGEN_X, GRONINGEN_Y, MAX_TILE_INDEX};
 use crate::osm::init_tile_cache;
-use crate::resources::{OSMData, TokioRuntime};
+use crate::resources::{OSMData, TokioRuntime, DebugSettings};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
+use crate::debug_log;
 
 /// Initialize resources for the application
 pub fn init_resources() -> (OSMData, TokioRuntime) {
@@ -58,6 +59,7 @@ pub fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    debug_settings: Res<DebugSettings>,
 ) {
     // Calculate world coordinates for Groningen location
     // With our new coordinate system:
@@ -102,7 +104,7 @@ pub fn setup(
     ));
 
     // Log current position for debugging (console only)
-    info!("Starting at world position: ({}, {})", world_x, world_z);
-    info!("Corresponding to OSM tile: ({}, {})", GRONINGEN_X, GRONINGEN_Y);
-    info!("Zoom level: {}, MAX_TILE_INDEX: {}", DEFAULT_ZOOM_LEVEL, MAX_TILE_INDEX);
+    debug_log!(debug_settings, "Starting at world position: ({}, {})", world_x, world_z);
+    debug_log!(debug_settings, "Corresponding to OSM tile: ({}, {})", GRONINGEN_X, GRONINGEN_Y);
+    debug_log!(debug_settings, "Zoom level: {}, MAX_TILE_INDEX: {}", DEFAULT_ZOOM_LEVEL, MAX_TILE_INDEX);
 } 

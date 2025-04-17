@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use crate::systems::setup::{setup, init_resources};
-use crate::resources::{MouseLookState, PersistentIslandSettings};
+use crate::resources::{MouseLookState, PersistentIslandSettings, DebugSettings};
 
 /// Core plugin that handles the basic app setup
 pub struct CorePlugin;
@@ -18,6 +18,7 @@ impl Plugin for CorePlugin {
                 highlight_islands: false,
                 editing_mode: false,
             })
+            .insert_resource(DebugSettings::default())
             .add_systems(Startup, setup);
     }
 } 

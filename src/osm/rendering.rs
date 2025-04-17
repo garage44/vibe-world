@@ -1,140 +1,7 @@
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use image::DynamicImage;
-use reqwest::Client;
-use std::time::Duration;
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::io;
-
-// Constants for the OSM tile system
-const TILE_SIZE: usize = 256; // Standard OSM tile size in pixels
-const CACHE_DIR: &str = "tile_cache"; // Directory for caching tiles
-
-pub struct OSMTile {
-    pub x: u32,
-    pub y: u32,
-    pub z: u32,
-}
-
-impl OSMTile {
-    pub fn new(x: u32, y: u32, z: u32) -> Self {
-        Self { x, y, z }
-    }
-
-    pub fn get_url(&self) -> String {
-        // Use the standard OSM tile server
-        // The URL format is zoom/x/y where:
-        // - x increases from west to east (0 to 2^zoom-1)
-        // - y increases from north to south (0 to 2^zoom-1)
-        format!(
-            "https://a.tile.openstreetmap.org/{}/{}/{}.png",
-            self.z, self.x, self.y
-        )
-    }
-
-    // Get cache file path for this tile
-    pub fn get_cache_path(&self) -> PathBuf {
-        let cache_path = Path::new(CACHE_DIR)
-            .join(self.z.to_string())
-            .join(self.x.to_string());
-
-        fs::create_dir_all(&cache_path).unwrap_or_else(|e| {
-            warn!("Failed to create cache directory: {}", e);
-        });
-
-        cache_path.join(format!("{}.png", self.y))
-    }
-}
-
-impl Clone for OSMTile {
-    fn clone(&self) -> Self {
-        Self {
-            x: self.x,
-            y: self.y,
-            z: self.z,
-        }
-    }
-}
-
-// Initialize the tile cache system
-pub fn init_tile_cache() -> io::Result<()> {
-    let cache_dir = Path::new(CACHE_DIR);
-    if !cache_dir.exists() {
-        fs::create_dir_all(cache_dir)?;
-        info!("Created tile cache directory: {}", cache_dir.display());
-    }
-    Ok(())
-}
-
-// Try to load a tile from the cache
-pub fn load_tile_from_cache(tile: &OSMTile) -> Option<DynamicImage> {
-    let cache_path = tile.get_cache_path();
-
-    if cache_path.exists() {
-        match image::open(&cache_path) {
-            Ok(img) => {
-                info!("Loaded tile {},{},{} from cache", tile.x, tile.y, tile.z);
-                return Some(img);
-            },
-            Err(e) => {
-                warn!("Failed to load cached tile: {}", e);
-                // Try to remove corrupt cache file
-                let _ = fs::remove_file(&cache_path);
-            }
-        }
-    }
-
-    None
-}
-
-// Save a tile to the cache
-pub fn save_tile_to_cache(tile: &OSMTile, image: &DynamicImage) {
-    let cache_path = tile.get_cache_path();
-
-    match image.save(&cache_path) {
-        Ok(_) => info!("Saved tile {},{},{} to cache", tile.x, tile.y, tile.z),
-        Err(e) => warn!("Failed to cache tile: {}", e),
-    }
-}
-
-pub async fn load_tile_image(tile: &OSMTile) -> Result<DynamicImage, anyhow::Error> {
-    // First try loading from cache
-    if let Some(cached_image) = load_tile_from_cache(tile) {
-        return Ok(cached_image);
-    }
-
-    // If not in cache, fetch from network
-    info!("Tile not in cache, fetching from network: {},{},{}", tile.x, tile.y, tile.z);
-
-    // Create a client with proper user agent and timeout
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("bevy_osm_viewer/0.1.0 (github.com/user/bevy_osm_viewer)")
-        .build()?;
-
-    let url = tile.get_url();
-    info!("Requesting OSM tile URL: {}", url);
-
-    // Attempt to load the tile with better error handling
-    let response = client.get(&url).send().await?;
-
-    if !response.status().is_success() {
-        error!("Failed to load tile {},{} - HTTP status: {}", tile.x, tile.y, response.status());
-        return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
-    }
-
-    let bytes = response.bytes().await?;
-    info!("Received {} bytes for tile {},{}", bytes.len(), tile.x, tile.y);
-
-    let image = image::load_from_memory(&bytes)?;
-    info!("Image loaded: {}x{}", image.width(), image.height());
-
-    // Save to cache
-    save_tile_to_cache(tile, &image);
-
-    Ok(image)
-}
+use crate::osm::tile::OSMTile;
 
 // Create a tile mesh with the loaded image
 pub fn create_tile_mesh(
@@ -276,6 +143,7 @@ pub fn create_fallback_tile_mesh(
 }
 
 // Create a material with special highlighting for persistent islands
+#[allow(dead_code)]
 pub fn create_highlighted_material(
     _materials: &mut Assets<StandardMaterial>,
     texture_handle: Handle<Image>,
@@ -294,4 +162,4 @@ pub fn create_highlighted_material(
         perceptual_roughness: 1.0, // No specular highlights
         ..default()
     }
-}
+} 

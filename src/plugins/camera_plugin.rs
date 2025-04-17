@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use crate::systems::{
     camera::{mouse_look_system, camera_movement},
     window::{grab_mouse, toggle_cursor_grab},
-    debug::debug_info,
+    debug::{debug_info, toggle_debug_mode},
 };
 
 /// Plugin for camera movement and control
@@ -17,6 +17,7 @@ impl Plugin for CameraPlugin {
                 camera_movement,
                 toggle_cursor_grab,
                 debug_info,
+                toggle_debug_mode,
             ));
     }
 } 

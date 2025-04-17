@@ -1,18 +1,35 @@
 use bevy::prelude::*;
-use crate::resources::{OSMData, PersistentIslandSettings};
+use crate::resources::{OSMData, PersistentIslandSettings, DebugSettings};
 use crate::components::{TileCoords, PersistentIsland};
 use crate::utils::coordinate_conversion::world_to_tile_coords;
 use crate::resources::constants::PERSISTENT_ISLAND_ZOOM_LEVEL;
+
+/// System to toggle debug mode with the 1 key
+pub fn toggle_debug_mode(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut debug_settings: ResMut<DebugSettings>,
+) {
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        debug_settings.debug_mode = !debug_settings.debug_mode;
+        info!("Debug mode: {}", if debug_settings.debug_mode { "ON" } else { "OFF" });
+    }
+}
 
 /// Debug system to print information about loaded tiles
 pub fn debug_info(
     osm_data: Res<OSMData>,
     island_settings: Res<PersistentIslandSettings>,
+    debug_settings: Res<DebugSettings>,
     time: Res<Time>,
     camera_query: Query<&Transform, With<Camera3d>>,
     _tile_query: Query<&TileCoords>,
     island_query: Query<&PersistentIsland>,
 ) {
+    // Skip if debug mode is disabled
+    if !debug_settings.debug_mode {
+        return;
+    }
+
     // Only run every few seconds
     if time.elapsed_secs() as usize % 5 != 0 {
         return;

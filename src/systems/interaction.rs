@@ -1,22 +1,24 @@
 use bevy::prelude::*;
-use crate::resources::{OSMData, PersistentIslandSettings};
+use crate::resources::{OSMData, PersistentIslandSettings, DebugSettings};
 use crate::components::{TileCoords, PersistentIsland};
 use crate::utils::coordinate_conversion::world_to_tile_coords;
 use crate::resources::constants::PERSISTENT_ISLAND_ZOOM_LEVEL;
+use crate::debug_log;
 
 /// System to handle user interaction with persistent islands
 pub fn interact_with_islands(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mouse_input: Res<ButtonInput<MouseButton>>,
     mut island_settings: ResMut<PersistentIslandSettings>,
+    debug_settings: Res<DebugSettings>,
     mut osm_data: ResMut<OSMData>,
     camera_query: Query<(&Transform, &Camera), With<Camera3d>>,
     tiles_query: Query<(Entity, &TileCoords, &Transform, Option<&PersistentIsland>)>,
-    mut materials_query: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    _materials_query: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
+    _materials: ResMut<Assets<StandardMaterial>>,
+    _meshes: ResMut<Assets<Mesh>>,
+    _images: ResMut<Assets<Image>>,
 ) {
     // Toggle highlight mode with H key
     if keyboard_input.just_pressed(KeyCode::KeyH) {
@@ -44,11 +46,11 @@ pub fn interact_with_islands(
                 let t = -ray_origin.y / ray_direction.y;
                 if t > 0.0 {
                     let hit_point = ray_origin + ray_direction * t;
-                    info!("Ray hit ground at position: {:?}", hit_point);
+                    debug_log!(debug_settings, "Ray hit ground at position: {:?}", hit_point);
                     
                     // Convert hit point to tile coordinates at the persistent island zoom level
                     let (tile_x, tile_y) = world_to_tile_coords(hit_point.x, hit_point.z, PERSISTENT_ISLAND_ZOOM_LEVEL);
-                    info!("Target tile at zoom level {}: {}, {}", PERSISTENT_ISLAND_ZOOM_LEVEL, tile_x, tile_y);
+                    debug_log!(debug_settings, "Target tile at zoom level {}: {}, {}", PERSISTENT_ISLAND_ZOOM_LEVEL, tile_x, tile_y);
                     
                     // Check if this is already a persistent island
                     if osm_data.persistent_islands.contains_key(&(tile_x, tile_y)) {
@@ -95,14 +97,14 @@ pub fn interact_with_islands(
                         }
                         
                         if !found_existing_tile {
-                            info!("Note: Island created but tile not yet loaded. It will get the island status when loaded.");
+                            debug_log!(debug_settings, "Note: Island created but tile not yet loaded. It will get the island status when loaded.");
                         }
                     }
                 } else {
-                    info!("Ray didn't hit ground plane - make sure you're looking at the ground");
+                    debug_log!(debug_settings, "Ray didn't hit ground plane - make sure you're looking at the ground");
                 }
             } else {
-                info!("Camera not found!");
+                debug_log!(debug_settings, "Camera not found!");
             }
         }
     }

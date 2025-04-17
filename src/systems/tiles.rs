@@ -1,15 +1,17 @@
 use bevy::prelude::*;
 use bevy::ecs::system::ParamSet;
-use crate::resources::{OSMData, TokioRuntime, PersistentIslandSettings};
+use crate::resources::{OSMData, TokioRuntime, PersistentIslandSettings, DebugSettings};
 use crate::components::{TileCoords, PersistentIsland};
 use crate::osm::{OSMTile, load_tile_image, create_tile_mesh, create_fallback_tile_mesh};
 use crate::utils::coordinate_conversion::world_to_tile_coords;
-use crate::resources::constants::{PERSISTENT_ISLAND_ZOOM_LEVEL, DEFAULT_ZOOM_LEVEL, max_tile_index, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL};
+use crate::resources::constants::{PERSISTENT_ISLAND_ZOOM_LEVEL, max_tile_index, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL};
+use crate::debug_log;
 
 // Process tiles with additional handling for persistent islands
 pub fn process_tiles(
     mut osm_data: ResMut<OSMData>,
     tokio_runtime: Res<TokioRuntime>,
+    debug_settings: Res<DebugSettings>,
     camera_query: Query<(&Transform, &Camera), With<Camera3d>>,
 ) {
     // Skip if we have no camera yet
@@ -103,7 +105,7 @@ pub fn process_tiles(
             }
         }
         
-        info!("Found {} islands near camera to check", persistent_islands_to_check.len());
+        debug_log!(debug_settings, "Found {} islands near camera to check", persistent_islands_to_check.len());
 
         // First, always load the actual island tiles at zoom level 17 if they're in view range
         for (pi_x, pi_y) in persistent_islands_to_check.clone() {
@@ -123,18 +125,25 @@ pub fn process_tiles(
             let tile = OSMTile::new(pi_x, pi_y, PERSISTENT_ISLAND_ZOOM_LEVEL);
             
             // Log what we're loading
-            info!("Loading persistent island tile: {}, {}", pi_x, pi_y);
+            debug_log!(debug_settings, "Loading persistent island tile: {}, {}", pi_x, pi_y);
+            
+            // Use debug flag for async task
+            let debug_mode = debug_settings.debug_mode;
             
             // Spawn async task to load the tile image using the Tokio runtime
             tokio_runtime.0.spawn(async move {
                 match load_tile_image(&tile).await {
                     Ok(image) => {
-                        info!("Successfully loaded persistent island: {}, {}", tile.x, tile.y);
+                        if debug_mode {
+                            info!("Successfully loaded persistent island: {}, {}", tile.x, tile.y);
+                        }
                         pending_tiles.lock().push((tile.x, tile.y, tile.z, Some(image)));
                     },
                     Err(e) => {
-                        info!("Failed to load persistent island: {}, {} - using fallback. Error: {}", 
-                              tile.x, tile.y, e);
+                        if debug_mode {
+                            info!("Failed to load persistent island: {}, {} - using fallback. Error: {}", 
+                                  tile.x, tile.y, e);
+                        }
                         pending_tiles.lock().push((tile.x, tile.y, tile.z, None)); // None means use fallback
                     }
                 }
@@ -186,7 +195,7 @@ pub fn process_tiles(
             }
         }
         
-        info!("Islands correspond to {} tiles at current zoom {}", current_zoom_island_tiles.len(), current_zoom);
+        debug_log!(debug_settings, "Islands correspond to {} tiles at current zoom {}", current_zoom_island_tiles.len(), current_zoom);
 
         // We'll define our camera frustum more efficiently for culling
         // Forward vector - where the camera is looking
@@ -283,26 +292,33 @@ pub fn process_tiles(
 
                 // Log what we're loading
                 if is_island_tile {
-                    info!("Loading island-corresponding tile: {}, {}, zoom {}", tile_x, tile_y, current_zoom);
+                    debug_log!(debug_settings, "Loading island-corresponding tile: {}, {}, zoom {}", tile_x, tile_y, current_zoom);
                 } else {
-                    info!("Loading regular tile: {}, {}, zoom {}", tile_x, tile_y, current_zoom);
+                    debug_log!(debug_settings, "Loading regular tile: {}, {}, zoom {}", tile_x, tile_y, current_zoom);
                 }
 
                 // Keep track whether this is an island tile (for rendering)
                 let tile_type = if is_island_tile { "island" } else { "regular" };
+                
+                // Use debug flag for async task
+                let debug_mode = debug_settings.debug_mode;
 
                 // Spawn async task to load the tile image using the Tokio runtime
                 tokio_runtime.0.spawn(async move {
                     match load_tile_image(&tile).await {
                         Ok(image) => {
-                            info!("Successfully loaded {} tile: {}, {}, zoom {}", 
-                                  tile_type, tile.x, tile.y, tile.z);
+                            if debug_mode {
+                                info!("Successfully loaded {} tile: {}, {}, zoom {}", 
+                                      tile_type, tile.x, tile.y, tile.z);
+                            }
                             // Include the tile type info in the pending_tiles data
                             pending_tiles.lock().push((tile.x, tile.y, tile.z, Some(image)));
                         },
                         Err(e) => {
-                            info!("Failed to load {} tile: {}, {}, zoom {} - using fallback. Error: {}", 
-                                  tile_type, tile.x, tile.y, tile.z, e);
+                            if debug_mode {
+                                info!("Failed to load {} tile: {}, {}, zoom {} - using fallback. Error: {}", 
+                                      tile_type, tile.x, tile.y, tile.z, e);
+                            }
                             pending_tiles.lock().push((tile.x, tile.y, tile.z, None)); // None means use fallback
                         }
                     }
@@ -320,6 +336,7 @@ pub fn apply_pending_tiles(
     mut images: ResMut<Assets<Image>>,
     mut osm_data: ResMut<OSMData>,
     _island_settings: Res<PersistentIslandSettings>,
+    debug_settings: Res<DebugSettings>,
     time: Res<Time>,
 ) {
     // Take pending tiles
@@ -372,11 +389,11 @@ pub fn apply_pending_tiles(
         let entity = match image_opt {
             Some(image) => {
                 if z == PERSISTENT_ISLAND_ZOOM_LEVEL {
-                    info!("Creating exact island tile: {}, {}, zoom {}", x, y, z);
+                    debug_log!(debug_settings, "Creating exact island tile: {}, {}, zoom {}", x, y, z);
                 } else if is_island_corresponding_tile {
-                    info!("Creating island corresponding tile: {}, {}, zoom {}", x, y, z);
+                    debug_log!(debug_settings, "Creating island corresponding tile: {}, {}, zoom {}", x, y, z);
                 } else {
-                    info!("Creating regular tile: {}, {}, zoom {}", x, y, z);
+                    debug_log!(debug_settings, "Creating regular tile: {}, {}, zoom {}", x, y, z);
                 }
                 
                 if needs_island_visuals {
@@ -460,7 +477,7 @@ pub fn apply_pending_tiles(
                 }
             },
             None => {
-                info!("Creating fallback entity for tile: {}, {}, zoom {}", x, y, z);
+                debug_log!(debug_settings, "Creating fallback entity for tile: {}, {}, zoom {}", x, y, z);
                 if needs_island_visuals {
                     // For islands, create a special colored fallback
                     let mut entity_builder = commands.spawn_empty();
@@ -620,6 +637,7 @@ pub fn update_visible_tiles(
 pub fn cleanup_old_tiles(
     mut commands: Commands,
     mut osm_data: ResMut<OSMData>,
+    debug_settings: Res<DebugSettings>,
     time: Res<Time>,
     mut param_set: ParamSet<(
         Query<(Entity, &TileCoords)>,
@@ -703,7 +721,7 @@ pub fn cleanup_old_tiles(
 
     // Log cleanup results if any tiles were removed
     if !tiles_to_remove.is_empty() {
-        info!("Cleaned up {} unused tiles", tiles_to_remove.len());
+        debug_log!(debug_settings, "Cleaned up {} unused tiles", tiles_to_remove.len());
     }
 }
 
@@ -715,6 +733,7 @@ pub fn auto_detect_zoom_level(
     mut _meshes: ResMut<Assets<Mesh>>,
     mut _materials: ResMut<Assets<StandardMaterial>>,
     tokio_runtime: Res<TokioRuntime>,
+    debug_settings: Res<DebugSettings>,
     _time: Res<Time>,
 ) {
     if let Ok(camera_transform) = camera_query.get_single() {
@@ -770,16 +789,23 @@ pub fn auto_detect_zoom_level(
                 let pending_tiles = osm_data.pending_tiles.clone();
                 let tile = OSMTile::new(center_x, center_y, next_potential_zoom);
 
-                info!("Preloading tile for potential zoom change: {}, {}, zoom {}", center_x, center_y, next_potential_zoom);
+                debug_log!(debug_settings, "Preloading tile for potential zoom change: {}, {}, zoom {}", center_x, center_y, next_potential_zoom);
+
+                // Use debug flag for async task
+                let debug_mode = debug_settings.debug_mode;
 
                 tokio_runtime.0.spawn(async move {
                     match load_tile_image(&tile).await {
                         Ok(image) => {
-                            info!("Successfully preloaded tile: {}, {}, zoom {}", tile.x, tile.y, tile.z);
+                            if debug_mode {
+                                info!("Successfully preloaded tile: {}, {}, zoom {}", tile.x, tile.y, tile.z);
+                            }
                             pending_tiles.lock().push((tile.x, tile.y, tile.z, Some(image)));
                         },
                         Err(e) => {
-                            info!("Failed to preload tile: {}, {}, zoom {} - Error: {}", tile.x, tile.y, tile.z, e);
+                            if debug_mode {
+                                info!("Failed to preload tile: {}, {}, zoom {} - Error: {}", tile.x, tile.y, tile.z, e);
+                            }
                             pending_tiles.lock().push((tile.x, tile.y, tile.z, None));
                         }
                     }
@@ -793,7 +819,7 @@ pub fn auto_detect_zoom_level(
             let old_zoom = osm_data.current_zoom;
             osm_data.current_zoom = new_zoom;
 
-            info!("Zoom level changed from {} to {} (camera height: {})",
+            debug_log!(debug_settings, "Zoom level changed from {} to {} (camera height: {})",
                   old_zoom, new_zoom, camera_height);
 
             // Clean up any tiles that are too far from current view

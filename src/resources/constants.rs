@@ -19,7 +19,9 @@ pub const MAX_TILE_INDEX: u32 = (1 << MAX_ZOOM_LEVEL) - 1;
 pub const GRONINGEN_X: u32 = 4216;
 pub const GRONINGEN_Y: u32 = 2668;
 
-// Color for highlighting persistent islands
+// Color for highlighting persistent islands - might be used in future
+#[allow(dead_code)]
 pub const ISLAND_HIGHLIGHT_COLOR: Color = Color::srgba(0.0, 1.0, 0.5, 0.5);
-// Border color for islands in regular mode - more subtle
+// Border color for islands in regular mode - might be used in future
+#[allow(dead_code)]
 pub const ISLAND_BORDER_COLOR: Color = Color::srgba(0.2, 0.8, 0.3, 0.3); 

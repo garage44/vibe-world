@@ -8,4 +8,4 @@ pub use osm_data::*;
 pub use runtime::*;
 pub use settings::*;
 pub use input::*;
-pub use constants::*; 
+// Constants are used directly, so no need to re-export 
