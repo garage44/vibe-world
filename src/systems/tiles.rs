@@ -42,7 +42,7 @@ pub fn process_tiles(
 }
 
 // Calculate appropriate base zoom level from camera height
-fn calculate_base_zoom_level(height: f32) -> u32 {
+pub fn calculate_base_zoom_level(height: f32) -> u32 {
     // Reduce height increments to make zoom level changes more responsive
     match height {
         h if h <= 1.0 => 19,   // Level 19: Local highways, crossings (1:1000 scale)
@@ -81,7 +81,7 @@ fn generate_adaptive_tiles(
     
     // Calculate viewing distance based on camera height and viewing angle
     let cam_height = camera_pos.y;
-    let angle_factor = 1.0 + (1.0 - camera_forward.y.abs()) * 2.0;
+    let _angle_factor = 1.0 + (1.0 - camera_forward.y.abs()) * 2.0;
     
     // For more horizontal views, look farther ahead
     // For more vertical views, look closer to camera position
@@ -181,9 +181,9 @@ fn generate_adaptive_tiles(
         // OPTIMIZATION: Use smaller radius for each ring
         // Higher zoom levels (more detailed) should cover smaller areas
         let radius = match ring_idx {
-            0 => 2, // Smallest, highest detail ring - just a small area
-            1 => 1, // Middle ring
-            _ => 1, // Outer ring
+            0 => 3, // Increased radius for highest detail ring
+            1 => 2, // Increased radius for middle ring 
+            _ => 2, // Increased radius for outer ring
         };
         
         // Calculate target center - inner rings are centered precisely at view_target
@@ -210,16 +210,20 @@ fn generate_adaptive_tiles(
         // Priority base for this ring - inner rings have higher priority
         let priority_base = ring_idx as i32 * 100;
         
-        // Add tiles in this ring
+        // Add tiles in a square pattern to cover the area
         for x_offset in -radius as i32..=radius as i32 {
             for y_offset in -radius as i32..=radius as i32 {
-                // Skip if we're not in this ring (for rings > 0)
+                // For outer rings, focus on the edges and corners
                 let manhattan_dist = x_offset.abs() + y_offset.abs();
                 
-                // For outer rings, we might want to only include the perimeter tiles
+                // Skip inner tiles in outer rings to avoid redundancy
                 if ring_idx > 0 && manhattan_dist < ring_idx as i32 {
-                    continue; // Skip interior tiles that are covered by inner rings
+                    continue;
                 }
+                
+                // Add extra coverage for diagonal directions
+                // This helps fill in gaps in the corners of the view
+                let is_diagonal = x_offset.abs() == y_offset.abs() && x_offset != 0;
                 
                 // Calculate tile coordinates with bounds checking
                 let tile_x = (center_x as i32 + x_offset).clamp(0, max_index as i32) as u32;
@@ -238,7 +242,9 @@ fn generate_adaptive_tiles(
                 covered_areas.push((tile_x, tile_y, zoom));
                 
                 // Calculate priority - closer to center = higher priority
-                let priority = priority_base + manhattan_dist;
+                // Give diagonals slightly better priority to improve corner coverage
+                let priority_adjustment = if is_diagonal { -1 } else { 0 };
+                let priority = priority_base + manhattan_dist + priority_adjustment;
                 
                 // Add to tiles to load (false = not background)
                 tiles_to_load.push((tile_x, tile_y, zoom, priority, false));
@@ -249,7 +255,7 @@ fn generate_adaptive_tiles(
     // No need to sort by priority - deduplication step will handle proper ordering
     
     // Further reduce total number of tiles
-    let max_total_tiles = 40; // Hard limit on total tiles to load
+    let max_total_tiles = 60; // Increased from 40 to allow better coverage
     if tiles_to_load.len() > max_total_tiles {
         // Keep all background tiles
         let (background_tiles, mut foreground_tiles): (Vec<_>, Vec<_>) = 
@@ -290,7 +296,7 @@ fn generate_adaptive_tiles(
             tokio_runtime,
             debug_settings,
             &fg_tiles,
-            12, // Limit concurrent loads
+            16, // Increased concurrent loads for smoother loading
             false, // Not background
         );
     }
@@ -615,17 +621,18 @@ pub fn update_visible_tiles(
             
             // For tiles to be visible, they should be:
             // 1. Within a reasonable distance (based on zoom level)
-            // 2. Within the camera's field of view
+            // 2. Roughly within the camera's field of view
             
-            // Calculate max visible distance based on zoom
-            let zoom_factor = 1.0 + 0.5 * (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32;
-            let max_distance = 50.0 * zoom_factor; // Higher zoom = smaller view distance
+            // Calculate max visible distance based on zoom and allow larger view area
+            let zoom_factor = 1.0 + 0.7 * (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32;
+            let max_distance = 75.0 * zoom_factor; // Increased from 50.0 to 75.0 for wider view
             
-            // Check if in front of camera (dot product with forward vector > 0)
+            // Use a wider angle check (more permissive) to avoid gaps at edges
             let forward_dot = camera_forward.dot(to_tile.normalize());
             
-            // Is the tile visible?
-            let is_visible = distance < max_distance && forward_dot > 0.0;
+            // Is the tile visible? More permissive check
+            // Forward dot > -0.3 means roughly within ~110 degree field of view (instead of 90)
+            let is_visible = distance < max_distance && forward_dot > -0.3;
             
             if is_visible {
                 // Update last used time if visible
@@ -634,8 +641,9 @@ pub fn update_visible_tiles(
                 // Tile is not visible
                 let time_since_used = current_time - tile_coords.last_used;
                 
-                // After 1 second of being outside view, remove non-background tiles
-                if time_since_used > 1.0 && tile_coords.zoom > 6 {
+                // After 1.5 seconds of being outside view, remove non-background tiles
+                // Slightly increased from 1.0 to 1.5 to prevent rapid flickering at edges
+                if time_since_used > 1.5 && tile_coords.zoom > 6 {
                     to_despawn.push(entity);
                 }
             }
