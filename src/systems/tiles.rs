@@ -6,6 +6,7 @@ use crate::osm::{OSMTile, load_tile_image, create_tile_mesh, create_fallback_til
 use crate::utils::coordinate_conversion::world_to_tile_coords;
 use crate::resources::constants::{PERSISTENT_ISLAND_ZOOM_LEVEL, max_tile_index, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL};
 use crate::debug_log;
+use std::collections::HashSet;
 
 // Process tiles with additional handling for persistent islands
 pub fn process_tiles(
@@ -17,21 +18,16 @@ pub fn process_tiles(
     // Skip if we have no camera yet
     if let Ok((camera_transform, _camera)) = camera_query.get_single() {
         let camera_pos = camera_transform.translation;
-        let _forward = camera_transform.forward();
         let current_zoom = osm_data.current_zoom;
 
         // Calculate the visible range (how many tiles from center to load in each direction)
         // Adjust based on zoom level to prevent loading too many tiles at once
         let visible_range = match current_zoom {
-            z if z >= 18 => 2,  // Very close zoom
-            z if z >= 16 => 3,  // Close zoom
-            z if z >= 14 => 4,  // Medium zoom
-            _ => 5,             // Far zoom
+            z if z >= 18 => 3,  // Very close zoom - increased range
+            z if z >= 16 => 4,  // Close zoom - increased range
+            z if z >= 14 => 5,  // Medium zoom - increased range
+            _ => 6,             // Far zoom - increased range
         };
-
-        // Center of current view
-        let _center_x = camera_pos.x.floor() as i32;
-        let _center_y = camera_pos.z.floor() as i32;
 
         // Tile coordinates at current zoom level
         let (tile_center_x, tile_center_y) = world_to_tile_coords(camera_pos.x, camera_pos.z, current_zoom);
@@ -197,52 +193,35 @@ pub fn process_tiles(
         
         debug_log!(debug_settings, "Islands correspond to {} tiles at current zoom {}", current_zoom_island_tiles.len(), current_zoom);
 
-        // We'll define our camera frustum more efficiently for culling
-        // Forward vector - where the camera is looking
-        let _forward = camera_transform.forward();
-        // Side vector - unused but kept for future use
-        let _right = camera_transform.right();
+        // Get the camera forward vector for view frustum
+        let forward = camera_transform.forward();
 
-        // Simple frustum culling - check if tile is in camera's field of view
+        // Calculate the max tile index for this zoom level
+        let max_index = max_tile_index(current_zoom);
+
+        // Create a square grid of tiles around the center
         for x_offset in -visible_range as i32..=visible_range as i32 {
             for y_offset in -visible_range as i32..=visible_range as i32 {
-                let max_index = max_tile_index(current_zoom);
+                // Calculate the tile coordinates with bounds checking
                 let tile_x = (tile_center_x as i32 + x_offset).clamp(0, max_index as i32) as u32;
                 let tile_y = (tile_center_y as i32 + y_offset).clamp(0, max_index as i32) as u32;
 
                 // Check if this tile corresponds to an island
                 let is_island_tile = current_zoom_island_tiles.contains(&(tile_x, tile_y));
 
-                // Calculate world position of this tile
-                let tile_pos = Vec3::new(tile_x as f32, 0.0, tile_y as f32);
+                // Calculate world position of this tile (center position)
+                let tile_pos = Vec3::new(tile_x as f32 + 0.5, 0.0, tile_y as f32 + 0.5);
 
                 // Calculate direction from camera to tile
                 let to_tile = tile_pos - camera_transform.translation;
 
-                // Normalize the direction
+                // Get the distance (for distance-based culling)
                 let dist = to_tile.length();
 
-                // Skip if too far away
-                if dist > visible_range as f32 * 2.5 {
-                    continue;
-                }
-
-                // Simple frustum test - is the tile in front of the camera?
-                // This helps avoid loading tiles behind the camera
-                let dot = to_tile.normalize().dot(*_forward);
-
-                // Skip tiles outside of viewing angle (behind or far to sides)
-                // Increasing this number narrows the viewing angle
-                // 0.0 would be 90 degrees to either side
-                let frustum_angle = -0.2; // Slightly behind camera to avoid pop-in when turning
-                if dot < frustum_angle {
-                    continue;
-                }
-
-                // Calculate manhattan distance from center for priority
+                // Calculate manhattan distance for priority
                 let distance = x_offset.abs() + y_offset.abs();
                 
-                // Prioritize island tiles by giving them lower distance value
+                // Adjust distance value based on whether it's an island tile
                 let adjusted_distance = if is_island_tile {
                     // Make islands higher priority by artificially reducing their distance
                     distance / 2
@@ -250,20 +229,30 @@ pub fn process_tiles(
                     distance
                 };
 
-                // Add to load queue if not already loaded/pending
+                // Skip tiles that are too far outside the view frustum
+                // But still load a more generous area to prevent gaps during camera rotation
+                let dot = to_tile.normalize().dot(*forward);
+                let frustum_angle = -0.3; // Include more tiles to avoid pop-in
+
+                // Only exclude tiles that are definitely behind the camera and far away
+                if dot < frustum_angle && dist > visible_range as f32 * 1.5 {
+                    continue;
+                }
+
+                // Add to load queue with its priority
                 tiles_to_load.push((tile_x, tile_y, adjusted_distance));
             }
         }
 
-        // Sort tiles by distance (closest first)
+        // Sort tiles by adjusted distance (closest and island tiles first)
         tiles_to_load.sort_by_key(|&(_, _, distance)| distance);
 
-        // Limit the number of concurrent loads to avoid overwhelming the system
-        // Adjust based on zoom level - fewer concurrent loads at higher zoom levels
+        // Calculate how many concurrent loads to allow
+        // Increase for smoother panning and zooming
         let max_concurrent_loads = match current_zoom {
-            z if z >= 17 => 4,  // Fewer loads at very high zoom
-            z if z >= 15 => 6,  // Medium at medium zoom
-            _ => 8,             // More at low zoom
+            z if z >= 17 => 8,   // More concurrent loads for high zoom levels
+            z if z >= 15 => 10,  // Even more for medium zoom
+            _ => 12,             // Most for low zoom levels
         };
 
         let mut concurrent_loads = 0;
@@ -653,9 +642,9 @@ pub fn cleanup_old_tiles(
     }
 
     // How long a tile can be unused before being unloaded (in seconds)
-    const TILE_TIMEOUT: f32 = 30.0;
+    const TILE_TIMEOUT: f32 = 45.0; // Increased from 30s to 45s
     // Longer timeout for persistent islands
-    const PERSISTENT_ISLAND_TIMEOUT: f32 = 120.0;
+    const PERSISTENT_ISLAND_TIMEOUT: f32 = 180.0; // Increased from 120s to 180s
     
     let current_time = time.elapsed_secs();
 
@@ -683,12 +672,46 @@ pub fn cleanup_old_tiles(
                                           *z == tile_coords.zoom
                                       );
             
-            let timeout = if is_persistent_island {
-                PERSISTENT_ISLAND_TIMEOUT // Longer timeout for persistent islands
-            } else {
-                TILE_TIMEOUT              // Standard timeout for regular tiles
+            // Check if this is an island-corresponding tile at non-island zoom level
+            let is_island_corresponding = tile_coords.zoom != PERSISTENT_ISLAND_ZOOM_LEVEL && {
+                // Calculate zoom difference
+                let zoom_diff = PERSISTENT_ISLAND_ZOOM_LEVEL as i32 - tile_coords.zoom as i32;
+                
+                if zoom_diff > 0 {
+                    // Current zoom < island zoom (zoomed out)
+                    // Check if any island, when scaled down, maps to this tile
+                    persistent_islands.iter().any(|(_, island_x, island_y, _)| {
+                        (*island_x >> zoom_diff as u32) == tile_coords.x && 
+                        (*island_y >> zoom_diff as u32) == tile_coords.y
+                    })
+                } else if zoom_diff < 0 {
+                    // Current zoom > island zoom (zoomed in)
+                    // Check if this tile is inside any island's area when scaled up
+                    let abs_diff = (-zoom_diff) as u32;
+                    persistent_islands.iter().any(|(_, island_x, island_y, _)| {
+                        let start_x = *island_x << abs_diff;
+                        let start_y = *island_y << abs_diff;
+                        let end_x = start_x + (1 << abs_diff) - 1;
+                        let end_y = start_y + (1 << abs_diff) - 1;
+                        
+                        tile_coords.x >= start_x && tile_coords.x <= end_x && 
+                        tile_coords.y >= start_y && tile_coords.y <= end_y
+                    })
+                } else {
+                    false // Same zoom level - handled by is_persistent_island
+                }
             };
             
+            // Determine timeout based on the type of tile
+            let timeout = if is_persistent_island {
+                PERSISTENT_ISLAND_TIMEOUT // Longest timeout for persistent islands
+            } else if is_island_corresponding {
+                PERSISTENT_ISLAND_TIMEOUT / 2.0 // Longer timeout for island-corresponding tiles
+            } else {
+                TILE_TIMEOUT // Standard timeout for regular tiles
+            };
+            
+            // Check if the timeout has been exceeded
             if current_time - tile_coords.last_used > timeout {
                 // Skip removing persistent islands completely if we want them to be truly persistent
                 if !is_persistent_island {
@@ -718,6 +741,40 @@ pub fn cleanup_old_tiles(
     for &entity in &tiles_to_remove {
         commands.entity(entity).despawn_recursive();
     }
+
+    // Also clean up the loaded_tiles list periodically to prevent it from growing too large
+    // Keep entries for:
+    // 1. Currently loaded tiles (in osm_data.tiles)
+    // 2. Persistent island tiles
+    // 3. Tiles that were loaded recently (within 5 minutes)
+    
+    // First collect all coordinates of currently loaded tiles
+    let active_coords: Vec<(u32, u32, u32)> = osm_data.tiles
+        .iter()
+        .map(|&(x, y, z, _)| (x, y, z))
+        .collect();
+    
+    // Create a set of persistent island coordinates to avoid borrowing issues
+    let persistent_island_coords: HashSet<(u32, u32)> = 
+        osm_data.persistent_islands.keys().cloned().collect();
+    
+    // Remove entries from loaded_tiles that are no longer needed
+    osm_data.loaded_tiles.retain(|&(x, y, z)| {
+        // Keep all current tiles
+        if active_coords.contains(&(x, y, z)) {
+            return true;
+        }
+        
+        // Keep persistent island tiles at zoom level 17
+        if z == PERSISTENT_ISLAND_ZOOM_LEVEL && 
+           persistent_island_coords.contains(&(x, y)) {
+            return true;
+        }
+        
+        // Remove entries that haven't been used in a long time
+        // This prevents the loaded_tiles list from growing indefinitely
+        false
+    });
 
     // Log cleanup results if any tiles were removed
     if !tiles_to_remove.is_empty() {
@@ -760,61 +817,86 @@ pub fn auto_detect_zoom_level(
             new_zoom = osm_data.current_zoom;
         }
 
-        // Preload tiles for the next potential zoom level
-        // This helps make transitions smoother by starting to load next zoom level
-        // tiles before we actually change levels
-        let next_potential_zoom = if camera_height > min_height_for_zoom + min_height_for_zoom * 0.7 {
-            // Going up, so maybe need to load lower zoom level (less detail)
-            if osm_data.current_zoom > MIN_ZOOM_LEVEL { osm_data.current_zoom - 1 } else { osm_data.current_zoom }
-        } else if camera_height < min_height_for_zoom + min_height_for_zoom * 0.3 {
-            // Going down, so maybe need to load higher zoom level (more detail)
-            if osm_data.current_zoom < MAX_ZOOM_LEVEL { osm_data.current_zoom + 1 } else { osm_data.current_zoom }
+        // Preload tiles for both the current zoom and the next potential zoom level
+        // This helps make transitions smoother
+        let potential_zoom_levels = if new_zoom != osm_data.current_zoom {
+            // We're changing zoom level, so preload for both current and new zoom
+            vec![osm_data.current_zoom, new_zoom]
         } else {
-            osm_data.current_zoom // Stay at current zoom
+            // Not changing zoom, but preload for potential next level
+            let next_potential_zoom = if camera_height > min_height_for_zoom + min_height_for_zoom * 0.7 {
+                // Going up, so maybe need to load lower zoom level (less detail)
+                if osm_data.current_zoom > MIN_ZOOM_LEVEL { osm_data.current_zoom - 1 } else { osm_data.current_zoom }
+            } else if camera_height < min_height_for_zoom + min_height_for_zoom * 0.3 {
+                // Going down, so maybe need to load higher zoom level (more detail)
+                if osm_data.current_zoom < MAX_ZOOM_LEVEL { osm_data.current_zoom + 1 } else { osm_data.current_zoom }
+            } else {
+                osm_data.current_zoom // Stay at current zoom
+            };
+            
+            if next_potential_zoom != osm_data.current_zoom {
+                vec![osm_data.current_zoom, next_potential_zoom]
+            } else {
+                vec![osm_data.current_zoom]
+            }
         };
 
-        // Only preload if it's a different zoom than current but not the one we're actively changing to
-        if next_potential_zoom != osm_data.current_zoom && next_potential_zoom != new_zoom {
-            // Preload just the center tile at the potential next zoom level
-            let (center_x, center_y) = world_to_tile_coords(camera_x, camera_z, next_potential_zoom);
-
-            // Check if tile is already loaded or pending
-            if !osm_data.loaded_tiles.contains(&(center_x, center_y, next_potential_zoom)) &&
-               !osm_data.pending_tiles.lock().iter().any(|(x, y, z, _)| *x == center_x && *y == center_y && *z == next_potential_zoom) {
-
-                // Mark as loaded to prevent duplicate requests
-                osm_data.loaded_tiles.push((center_x, center_y, next_potential_zoom));
-
-                // Set up async task to preload this tile
-                let pending_tiles = osm_data.pending_tiles.clone();
-                let tile = OSMTile::new(center_x, center_y, next_potential_zoom);
-
-                debug_log!(debug_settings, "Preloading tile for potential zoom change: {}, {}, zoom {}", center_x, center_y, next_potential_zoom);
-
-                // Use debug flag for async task
-                let debug_mode = debug_settings.debug_mode;
-
-                tokio_runtime.0.spawn(async move {
-                    match load_tile_image(&tile).await {
-                        Ok(image) => {
-                            if debug_mode {
-                                info!("Successfully preloaded tile: {}, {}, zoom {}", tile.x, tile.y, tile.z);
+        // Preload tiles in a small area around the camera for each potential zoom level
+        for &zoom_level in &potential_zoom_levels {
+            // Skip if this is the current zoom and we're not changing levels
+            if zoom_level == osm_data.current_zoom && new_zoom == osm_data.current_zoom {
+                continue;
+            }
+            
+            // Get tile coordinates at this zoom level
+            let (center_x, center_y) = world_to_tile_coords(camera_x, camera_z, zoom_level);
+            
+            // Preload a 3x3 grid around the center for smooth transitions
+            let preload_range = 2;
+            
+            for x_offset in -preload_range..=preload_range {
+                for y_offset in -preload_range..=preload_range {
+                    let tile_x = (center_x as i32 + x_offset).max(0) as u32;
+                    let tile_y = (center_y as i32 + y_offset).max(0) as u32;
+                    
+                    // Only load if it's not already loaded or pending
+                    if !osm_data.loaded_tiles.contains(&(tile_x, tile_y, zoom_level)) &&
+                       !osm_data.pending_tiles.lock().iter().any(|(x, y, z, _)| 
+                           *x == tile_x && *y == tile_y && *z == zoom_level) {
+                           
+                        // Mark as loaded to prevent duplicate requests
+                        osm_data.loaded_tiles.push((tile_x, tile_y, zoom_level));
+                        
+                        let pending_tiles = osm_data.pending_tiles.clone();
+                        let tile = OSMTile::new(tile_x, tile_y, zoom_level);
+                        
+                        debug_log!(debug_settings, "Preloading tile for zoom transition: {}, {}, zoom {}", tile_x, tile_y, zoom_level);
+                        
+                        // Use debug flag for async task
+                        let debug_mode = debug_settings.debug_mode;
+                        
+                        tokio_runtime.0.spawn(async move {
+                            match load_tile_image(&tile).await {
+                                Ok(image) => {
+                                    if debug_mode {
+                                        info!("Successfully preloaded tile: {}, {}, zoom {}", tile.x, tile.y, tile.z);
+                                    }
+                                    pending_tiles.lock().push((tile.x, tile.y, tile.z, Some(image)));
+                                },
+                                Err(e) => {
+                                    if debug_mode {
+                                        info!("Failed to preload tile: {}, {}, zoom {} - Error: {}", tile.x, tile.y, tile.z, e);
+                                    }
+                                    pending_tiles.lock().push((tile.x, tile.y, tile.z, None));
+                                }
                             }
-                            pending_tiles.lock().push((tile.x, tile.y, tile.z, Some(image)));
-                        },
-                        Err(e) => {
-                            if debug_mode {
-                                info!("Failed to preload tile: {}, {}, zoom {} - Error: {}", tile.x, tile.y, tile.z, e);
-                            }
-                            pending_tiles.lock().push((tile.x, tile.y, tile.z, None));
-                        }
+                        });
                     }
-                });
+                }
             }
         }
 
-        // Only change zoom levels if it's been stable for a while
-        // This prevents rapid oscillation between zoom levels
+        // Only change zoom levels if needed
         if new_zoom != osm_data.current_zoom {
             let old_zoom = osm_data.current_zoom;
             osm_data.current_zoom = new_zoom;
@@ -822,17 +904,27 @@ pub fn auto_detect_zoom_level(
             debug_log!(debug_settings, "Zoom level changed from {} to {} (camera height: {})",
                   old_zoom, new_zoom, camera_height);
 
-            // Clean up any tiles that are too far from current view
-            // This is a more gradual approach than removing all tiles
+            // Keep existing tiles that are near the current view rather than removing them all
+            // Only remove tiles that are far from view or at very different zoom levels
             let mut tiles_to_remove = Vec::new();
             let (center_x, center_y) = world_to_tile_coords(camera_x, camera_z, new_zoom);
 
-            // Calculate maximum visible distance at this zoom level
-            let visible_range = 5; // Increased for smoother transitions
+            // Calculate visible range at current zoom level
+            let visible_range = match new_zoom {
+                z if z >= 18 => 3,  // Very close zoom
+                z if z >= 16 => 4,  // Close zoom
+                z if z >= 14 => 5,  // Medium zoom
+                _ => 6,             // Far zoom
+            };
 
-            // Find tiles to remove (those at wrong zoom level)
-            // Keep old tiles until new ones load to prevent flashing
+            // Find tiles to remove (those at wrong zoom level or far away)
             for (i, &(tile_x, tile_y, tile_zoom, entity)) in osm_data.tiles.iter().enumerate() {
+                // Keep persistent island tiles regardless of zoom
+                if tile_zoom == PERSISTENT_ISLAND_ZOOM_LEVEL {
+                    continue;
+                }
+                
+                // Check if the tile is at a different zoom level than the current one
                 if tile_zoom != new_zoom {
                     // Only remove tiles that are very far from current view
                     // to prevent gaps during loading
@@ -848,8 +940,19 @@ pub fn auto_detect_zoom_level(
                         (tile_x as i32 * mul, tile_y as i32 * mul)
                     };
 
-                    if (scaled_x - center_x as i32).abs() > visible_range * 3 ||
-                       (scaled_y - center_y as i32).abs() > visible_range * 3 {
+                    // Use a wider range for keeping tiles during zoom transitions
+                    // Keep if it's within an expanded visible range
+                    if (scaled_x - center_x as i32).abs() > visible_range as i32 * 4 ||
+                       (scaled_y - center_y as i32).abs() > visible_range as i32 * 4 ||
+                       (tile_zoom as i32 - new_zoom as i32).abs() > 2 { // Remove tiles more than 2 zoom levels away
+                        tiles_to_remove.push((i, entity));
+                    }
+                } else {
+                    // Same zoom level but check if it's too far away
+                    let x_diff = (tile_x as i32 - center_x as i32).abs();
+                    let y_diff = (tile_y as i32 - center_y as i32).abs();
+                    
+                    if x_diff > visible_range as i32 * 3 || y_diff > visible_range as i32 * 3 {
                         tiles_to_remove.push((i, entity));
                     }
                 }
@@ -862,10 +965,19 @@ pub fn auto_detect_zoom_level(
                 osm_data.tiles.remove(idx);
             }
 
-            // Don't clear all loaded tiles - just the ones that are too far from view
-            // This helps prevent regenerating tiles that we might need again soon
-            let center_coords = (center_x, center_y);
+            // Also clean up the loaded_tiles list to prevent it from growing too large
+            // Keep more loaded_tiles entries to avoid unnecessary reloading
+            
+            // Create a set of persistent island coordinates to avoid borrowing issues
+            let persistent_island_coords: HashSet<(u32, u32)> = 
+                osm_data.persistent_islands.keys().cloned().collect();
+                
             osm_data.loaded_tiles.retain(|(x, y, z)| {
+                if *z == PERSISTENT_ISLAND_ZOOM_LEVEL {
+                    // Always keep persistent island tiles in the loaded list
+                    return persistent_island_coords.contains(&(*x, *y));
+                }
+                
                 if *z != new_zoom {
                     let (scaled_x, scaled_y) = if *z > new_zoom {
                         // Converting from higher zoom to lower zoom
@@ -877,15 +989,21 @@ pub fn auto_detect_zoom_level(
                         (*x as i32 * mul, *y as i32 * mul)
                     };
 
-                    // Keep if close to center
-                    let x_diff = (scaled_x - center_coords.0 as i32).abs();
-                    let y_diff = (scaled_y - center_coords.1 as i32).abs();
+                    // Keep if close to center or at a zoom level near the current one
+                    let x_diff = (scaled_x - center_x as i32).abs();
+                    let y_diff = (scaled_y - center_y as i32).abs();
+                    let zoom_diff = (*z as i32 - new_zoom as i32).abs();
 
-                    x_diff <= (visible_range * 3) &&
-                    y_diff <= (visible_range * 3)
+                    x_diff <= (visible_range as i32 * 5) &&
+                    y_diff <= (visible_range as i32 * 5) &&
+                    zoom_diff <= 2  // Keep tiles within 2 zoom levels
                 } else {
-                    // Keep all tiles at the current zoom level
-                    true
+                    // Keep tiles at the current zoom level if they're reasonably close
+                    let x_diff = (*x as i32 - center_x as i32).abs();
+                    let y_diff = (*y as i32 - center_y as i32).abs();
+                    
+                    x_diff <= (visible_range as i32 * 5) &&
+                    y_diff <= (visible_range as i32 * 5)
                 }
             });
         }
