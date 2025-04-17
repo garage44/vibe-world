@@ -1,7 +1,20 @@
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use image::DynamicImage;
+use bevy::color::LinearRgba;
 use crate::osm::tile::OSMTile;
+use crate::resources::constants::DEFAULT_ZOOM_LEVEL;
+use crate::components::{TileCoords, BackgroundTile};
+
+// Bundle for the tile entity to ensure all components are added atomically
+#[derive(Bundle)]
+struct TileBundle {
+    mesh: Mesh3d,
+    material: MeshMaterial3d<StandardMaterial>,
+    transform: Transform,
+    global_transform: GlobalTransform,
+    name: Name,
+}
 
 // Create a tile mesh with the loaded image
 pub fn create_tile_mesh(
@@ -11,6 +24,8 @@ pub fn create_tile_mesh(
     images: &mut Assets<Image>,
     tile: &OSMTile,
     image: DynamicImage,
+    current_time: f32,
+    is_background: bool,
 ) -> Entity {
     // Create a custom mesh for a horizontal tile (XZ plane with Y as up)
     let mut mesh = Mesh::new(
@@ -65,22 +80,43 @@ pub fn create_tile_mesh(
         ..default()
     });
 
-    // Position tiles according to their OSM coordinates
-    // We need to adjust based on zoom level - at each higher zoom level,
-    // the tiles are half the size of the previous level
-    commands
-        .spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(material),
-            Transform::from_xyz(
-                tile.x as f32,       // X coordinate (eastward)
-                0.0,                 // At ground level
-                tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
-            ),
-            // Add name for debugging
-            Name::new(format!("Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
-        ))
-        .id()
+    // Calculate zoom level difference to determine scaling and positioning
+    let zoom_difference = tile.z as i32 - DEFAULT_ZOOM_LEVEL as i32;
+    let scale_factor = 2_f32.powi(-zoom_difference); // Inverse because higher zoom = smaller tile
+
+    // Create mesh and material handles
+    let mesh_handle = meshes.add(mesh);
+    let material_handle = material;
+
+    // Create transform
+    let transform = Transform::from_xyz(
+        tile.x as f32 * scale_factor,       // Scale X coordinate
+        0.0,                               // At ground level
+        tile.y as f32 * scale_factor        // Scale Z coordinate
+    )
+    .with_scale(Vec3::new(scale_factor, 1.0, scale_factor)); // Scale the tile size
+
+    // Spawn entity with everything at once
+    let mut entity_builder = commands.spawn((
+        Mesh3d(mesh_handle),
+        MeshMaterial3d(material_handle),
+        transform,
+        GlobalTransform::default(),
+        Name::new(format!("Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
+        TileCoords {
+            x: tile.x,
+            y: tile.y,
+            zoom: tile.z,
+            last_used: current_time,
+        },
+    ));
+    
+    // Add background component if this is a background tile
+    if is_background {
+        entity_builder.insert(BackgroundTile);
+    }
+    
+    entity_builder.id()
 }
 
 // Create a fallback tile mesh for when the image can't be loaded
@@ -89,6 +125,8 @@ pub fn create_fallback_tile_mesh(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     tile: &OSMTile,
+    current_time: f32,
+    is_background: bool,
 ) -> Entity {
     // Create a custom mesh for a horizontal tile (XZ plane with Y as up)
     let mut mesh = Mesh::new(
@@ -126,20 +164,43 @@ pub fn create_fallback_tile_mesh(
         ..default()
     });
 
-    // Spawn the fallback tile entity with same positioning as regular tiles
-    commands
-        .spawn((
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(material),
-            Transform::from_xyz(
-                tile.x as f32,       // X coordinate (eastward)
-                0.0,                 // At ground level
-                tile.y as f32        // Direct mapping of OSM Y to world Z (southward)
-            ),
-            // Add name for debugging
-            Name::new(format!("Fallback Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
-        ))
-        .id()
+    // Calculate zoom level difference to determine scaling and positioning
+    let zoom_difference = tile.z as i32 - DEFAULT_ZOOM_LEVEL as i32;
+    let scale_factor = 2_f32.powi(-zoom_difference); // Inverse because higher zoom = smaller tile
+
+    // Create mesh and material handles
+    let mesh_handle = meshes.add(mesh);
+    let material_handle = material;
+
+    // Create transform
+    let transform = Transform::from_xyz(
+        tile.x as f32 * scale_factor,     // Scale X coordinate
+        0.0,                             // At ground level
+        tile.y as f32 * scale_factor      // Scale Z coordinate
+    )
+    .with_scale(Vec3::new(scale_factor, 1.0, scale_factor)); // Scale the tile size
+
+    // Spawn entity with everything at once
+    let mut entity_builder = commands.spawn((
+        Mesh3d(mesh_handle),
+        MeshMaterial3d(material_handle),
+        transform,
+        GlobalTransform::default(),
+        Name::new(format!("Fallback Tile {},{}, zoom {}", tile.x, tile.y, tile.z)),
+        TileCoords {
+            x: tile.x,
+            y: tile.y,
+            zoom: tile.z,
+            last_used: current_time,
+        },
+    ));
+    
+    // Add background component if this is a background tile
+    if is_background {
+        entity_builder.insert(BackgroundTile);
+    }
+    
+    entity_builder.id()
 }
 
 // Create a material with special highlighting for persistent islands

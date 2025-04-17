@@ -1,10 +1,9 @@
 use bevy::prelude::*;
-use crate::resources::constants::{DEFAULT_ZOOM_LEVEL, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL, GRONINGEN_X, GRONINGEN_Y, MAX_TILE_INDEX};
+use crate::resources::constants::{DEFAULT_ZOOM_LEVEL, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL, BACKGROUND_ZOOM_LEVEL, GRONINGEN_X, GRONINGEN_Y, MAX_TILE_INDEX, zoom_level_from_camera_height};
 use crate::osm::init_tile_cache;
 use crate::resources::{OSMData, TokioRuntime, DebugSettings};
 use std::sync::Arc;
 use parking_lot::Mutex;
-use std::collections::HashMap;
 use tokio::runtime::Runtime;
 use crate::debug_log;
 
@@ -18,37 +17,42 @@ pub fn init_resources() -> (OSMData, TokioRuntime) {
         eprintln!("Warning: Failed to initialize tile cache: {}", e);
     }
 
-    // Calculate zoom level height thresholds
-    // Higher altitude = lower zoom level (less detail but wider area)
+    // Calculate zoom level height thresholds using the standardized function
     let mut height_thresholds = Vec::new();
-    for zoom in MIN_ZOOM_LEVEL..=MAX_ZOOM_LEVEL {
-        // More gradual height changes between zoom levels
-        // Exponential relationship between height and zoom level
-        // Each zoom level increase doubles the detail and halves the view area
-        // Use more compressed ranges for higher zoom levels to allow closer zooming
-        let min_height = match zoom {
-            z if z >= 17 => 3.0 + (z - 17) as f32 * 0.7, // Very close zoom levels
-            z if z >= 15 => 5.0 + (z - 15) as f32 * 1.0, // Close zoom levels
-            _ => 10.0 * 1.5_f32.powi((DEFAULT_ZOOM_LEVEL as i32 - zoom as i32) as i32), // Standard progression
-        };
-        height_thresholds.push((min_height, zoom));
+    
+    // Start from a low height (near the ground) and go up
+    // This provides a more balanced distribution following OpenStreetMap conventions
+    let heights = [
+        1.5, 3.0, 5.0, 8.0, 12.0, 20.0, 35.0, 60.0, 
+        100.0, 150.0, 200.0, 250.0, 300.0, 400.0, 500.0, 
+        700.0, 1000.0, 1500.0, 2000.0
+    ];
+    
+    for height in heights.iter() {
+        let zoom = zoom_level_from_camera_height(*height);
+        if zoom >= MIN_ZOOM_LEVEL && zoom <= MAX_ZOOM_LEVEL {
+            height_thresholds.push((*height, zoom));
+        }
     }
-    // Sort by height descending (higher altitude = lower zoom)
-    height_thresholds.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    
+    // Sort by height ascending (lower height = higher zoom)
+    height_thresholds.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     // Log the height thresholds for debugging
     for (height, zoom) in &height_thresholds {
-        println!("Zoom level {}: min height {}", zoom, height);
+        println!("Height {:.1}: zoom level {}", height, zoom);
     }
 
     let osm_data = OSMData {
         tiles: Vec::new(),
+        background_tiles: Vec::new(),
         loaded_tiles: Vec::new(),
+        loaded_background_tiles: Vec::new(),
         pending_tiles: Arc::new(Mutex::new(Vec::new())),
         current_zoom: DEFAULT_ZOOM_LEVEL,
+        background_zoom: BACKGROUND_ZOOM_LEVEL,
         height_thresholds,
         total_time: 0.0,
-        persistent_islands: HashMap::new(),
     };
 
     (osm_data, TokioRuntime(runtime))
@@ -72,7 +76,13 @@ pub fn setup(
     // Position at Groningen coordinates
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(world_x, 5.0, world_z) // Raised camera height for better overview
+        PerspectiveProjection {
+            fov: std::f32::consts::PI / 2.0, // 90 degrees FOV
+            aspect_ratio: 1.0, // Will be updated by Bevy
+            near: 0.1,
+            far: 10000.0,
+        },
+        Transform::from_xyz(world_x, 200.0, world_z) // Higher camera for better overview
             .looking_at(Vec3::new(world_x, 0.0, world_z), Vec3::Y),
     ));
 

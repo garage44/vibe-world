@@ -7,4 +7,8 @@ pub struct TileCoords {
     pub y: u32,
     pub zoom: u32,
     pub last_used: f32, // Time when this tile was last in view
-} 
+}
+
+/// Component to mark tiles as background low-resolution tiles
+#[derive(Component)]
+pub struct BackgroundTile; 

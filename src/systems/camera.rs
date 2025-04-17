@@ -79,12 +79,36 @@ pub fn camera_movement(
         movement = movement.normalize();
     }
 
-    // Check if boost mode (Shift) is active
-    let movement_speed = if keyboard_input.pressed(KeyCode::ShiftLeft) {
-        base_movement_speed * boost_multiplier
-    } else {
-        base_movement_speed
+    // Calculate altitude-based speed multiplier
+    // As camera height increases, speed increases proportionally
+    let height = transform.translation.y.max(1.0); // Ensure minimum height of 1.0
+    let altitude_factor = {
+        if height <= 5.0 {
+            1.0 // Base speed at low heights
+        } else if height <= 20.0 {
+            // Linear scaling for medium heights: 1.0 - 4.0x
+            1.0 + (height - 5.0) / 5.0
+        } else if height <= 50.0 {
+            // Medium-high altitudes: 4.0 - 8.0x
+            4.0 + (height - 20.0) / 10.0
+        } else if height <= 100.0 {
+            // High altitudes: 8.0 - 15.0x
+            8.0 + (height - 50.0) / 10.0
+        } else {
+            // Very high altitudes: 15.0x and above
+            15.0 + (height - 100.0) / 20.0
+        }
     };
+
+    // Check if boost mode (Shift) is active
+    let boost = if keyboard_input.pressed(KeyCode::ShiftLeft) {
+        boost_multiplier
+    } else {
+        1.0
+    };
+
+    // Calculate final movement speed using both altitude and boost factors
+    let movement_speed = base_movement_speed * altitude_factor * boost;
 
     // Apply movement to position
     transform.translation += movement * movement_speed * delta;

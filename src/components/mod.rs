@@ -1,5 +1,9 @@
 mod tile;
-mod island;
 
 pub use tile::*;
-pub use island::*; 
+
+use bevy::prelude::*;
+
+/// Marker component for the UI text that displays the current zoom level
+#[derive(Component)]
+pub struct ZoomLevelText; 
