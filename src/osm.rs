@@ -274,3 +274,24 @@ pub fn create_fallback_tile_mesh(
         ))
         .id()
 }
+
+// Create a material with special highlighting for persistent islands
+pub fn create_highlighted_material(
+    _materials: &mut Assets<StandardMaterial>,
+    texture_handle: Handle<Image>,
+    highlight_color: Color,
+) -> StandardMaterial {
+    // Create a material with highlighting for islands
+    StandardMaterial {
+        base_color_texture: Some(texture_handle),
+        base_color: highlight_color, // Apply a tint
+        unlit: false, // Keep lighting enabled to show the tint
+        alpha_mode: AlphaMode::Blend, // Enable transparency
+        double_sided: true, // Make the material visible from both sides
+        cull_mode: None,
+        reflectance: 0.0, // No reflections to see the texture directly
+        metallic: 0.0,    // No metallic effect to see the texture directly
+        perceptual_roughness: 1.0, // No specular highlights
+        ..default()
+    }
+}
