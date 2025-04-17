@@ -1,7 +1,6 @@
 use bevy::prelude::*;
 use bevy::render::render_asset::RenderAssetUsages;
 use image::DynamicImage;
-use bevy::color::LinearRgba;
 use crate::osm::tile::OSMTile;
 use crate::resources::constants::DEFAULT_ZOOM_LEVEL;
 use crate::components::{TileCoords, BackgroundTile};
@@ -64,19 +63,24 @@ pub fn create_tile_mesh(
     // Check if we need to flip the image vertically to match the UV coordinates
     // OSM tiles have (0,0) at the top-left
     let flipped_image = image::DynamicImage::ImageRgba8(image.to_rgba8());
+    
+    // PERFORMANCE: Create texture with optimal rendering settings
     let texture = Image::from_dynamic(flipped_image, true, RenderAssetUsages::default());
     let texture_handle = images.add(texture);
 
-    // Create a material with the texture
+    // FIX VISIBILITY: Return to AlphaMode::Blend if the OSM tiles have transparency
+    // Many map tiles have transparent areas that need to be rendered properly
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(texture_handle),
-        unlit: true, // Make the material unlit so it's always visible regardless of lighting
-        alpha_mode: AlphaMode::Blend, // Enable transparency
-        double_sided: true, // Make the material visible from both sides
+        unlit: true, // Make the material unlit for better performance
+        alpha_mode: AlphaMode::Blend, // Changed back to Blend to support transparency in tiles
+        // Important: Double-sided rendering is needed for map tiles visibility
+        double_sided: true,
         cull_mode: None,
-        reflectance: 0.0, // No reflections to see the texture directly
-        metallic: 0.0,    // No metallic effect to see the texture directly
-        perceptual_roughness: 1.0, // No specular highlights
+        // Performance: Minimal material properties
+        perceptual_roughness: 1.0,
+        metallic: 0.0,
+        reflectance: 0.0,
         ..default()
     });
 
@@ -164,13 +168,13 @@ pub fn create_fallback_tile_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(bevy::render::mesh::Indices::U32(indices));
 
-    // Create a checkered pattern material to indicate missing tile
+    // FIX VISIBILITY: Change fallback material to be more visible
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb(0.8, 0.2, 0.2), // Red color for missing tiles
-        emissive: LinearRgba::new(0.5, 0.1, 0.1, 0.5), // Slight glow
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        double_sided: true, // Make the material visible from both sides
+        alpha_mode: AlphaMode::Opaque, // Make opaque for better performance
+        unlit: true, // Unlit for better performance
+        // Important: Double-sided rendering is needed for map tiles visibility
+        double_sided: true,
         cull_mode: None,
         ..default()
     });

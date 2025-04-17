@@ -19,13 +19,22 @@ impl OSMTile {
     }
 
     pub fn get_url(&self) -> String {
-        // Use the standard OSM tile server
+        // Use standard OSM tile servers with rotating subdomains
         // The URL format is zoom/x/y where:
         // - x increases from west to east (0 to 2^zoom-1)
         // - y increases from north to south (0 to 2^zoom-1)
+        
+        // Calculate which subdomain to use based on coordinates
+        // Simple rotation through a, b, c domains
+        let subdomain = match (self.x + self.y) % 3 {
+            0 => "a",
+            1 => "b",
+            _ => "c",
+        };
+        
         format!(
-            "https://a.tile.openstreetmap.org/{}/{}/{}.png",
-            self.z, self.x, self.y
+            "https://{}.tile.openstreetmap.org/{}/{}/{}.png",
+            subdomain, self.z, self.x, self.y
         )
     }
 

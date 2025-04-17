@@ -12,7 +12,17 @@ pub fn process_tiles(
     tokio_runtime: Res<TokioRuntime>,
     debug_settings: Res<DebugSettings>,
     camera_query: Query<(&Transform, &Camera), With<Camera3d>>,
+    time: Res<Time>,
 ) {
+    // Run updates at a reasonable frequency
+    let update_interval = 0.15; // Update at ~7Hz (every 150ms)
+    
+    // Use the time as a simple frame counter by checking the fractional part
+    if (time.elapsed_secs() / update_interval).fract() > 0.8 {
+        // Skip most frames
+        return;
+    }
+    
     // Skip if we have no camera yet
     if let Ok((camera_transform, _camera)) = camera_query.get_single() {
         let camera_pos = camera_transform.translation;
@@ -20,6 +30,16 @@ pub fn process_tiles(
         
         // Calculate base zoom level from camera height - this determines the detail level
         let base_zoom = calculate_base_zoom_level(camera_pos.y);
+        
+        // PERFORMANCE: Only update when zoom level changes to avoid constant recalculation
+        let zoom_changed = base_zoom != osm_data.current_zoom;
+        
+        // If nothing changed in camera position, avoid expensive tile generation
+        if !zoom_changed && osm_data.tiles.len() > 5 {
+            // Some tiles are loaded and zoom hasn't changed, don't need to regenerate
+            // Waiting for a zoom change or visibility updates will handle tile loading
+            return;
+        }
         
         // Update global zoom level for UI and other systems
         osm_data.current_zoom = base_zoom;
@@ -148,9 +168,9 @@ fn generate_adaptive_tiles(
     let max_zoom_levels = if cam_height > 500.0 {
         1 // At very high heights, just use one zoom level
     } else if cam_height > 200.0 {
-        2 // At high heights, use two zoom levels
+        1 // Just use one zoom level for better performance
     } else {
-        3 // At lower heights, use three zoom levels for more detail variation
+        2 // At lower heights, use at most two zoom levels
     };
     
     // Create zoom level array
@@ -164,10 +184,6 @@ fn generate_adaptive_tiles(
         zoom_levels.push((highest_zoom.saturating_sub(2)).max(MIN_ZOOM_LEVEL));
     }
     
-    if max_zoom_levels > 2 {
-        zoom_levels.push((highest_zoom.saturating_sub(4)).max(MIN_ZOOM_LEVEL));
-    }
-    
     // OPTIMIZATION: Keep track of covered areas to avoid loading redundant tiles
     let mut covered_areas: Vec<(u32, u32, u32)> = Vec::new(); // (tile_x, tile_y, zoom)
     
@@ -178,12 +194,11 @@ fn generate_adaptive_tiles(
             continue;
         }
         
-        // OPTIMIZATION: Use smaller radius for each ring
+        // OPTIMIZATION: Use reasonable radius for each ring
         // Higher zoom levels (more detailed) should cover smaller areas
         let radius = match ring_idx {
-            0 => 3, // Increased radius for highest detail ring
-            1 => 2, // Increased radius for middle ring 
-            _ => 2, // Increased radius for outer ring
+            0 => 3, // Main detail ring - needs enough coverage
+            _ => 2, // Outer rings - provides some context
         };
         
         // Calculate target center - inner rings are centered precisely at view_target
@@ -255,7 +270,7 @@ fn generate_adaptive_tiles(
     // No need to sort by priority - deduplication step will handle proper ordering
     
     // Further reduce total number of tiles
-    let max_total_tiles = 60; // Increased from 40 to allow better coverage
+    let max_total_tiles = 45; // Balanced value for performance and visibility
     if tiles_to_load.len() > max_total_tiles {
         // Keep all background tiles
         let (background_tiles, mut foreground_tiles): (Vec<_>, Vec<_>) = 
@@ -539,9 +554,21 @@ pub fn apply_pending_tiles(
     debug_settings: Res<DebugSettings>,
     time: Res<Time>,
 ) {
-    // Take pending tiles
+    // PERFORMANCE: Limit the number of tiles we process in a single frame
+    // Processing too many tiles at once can cause frame drops
+    const MAX_TILES_PER_FRAME: usize = 5;
+    
+    // Take pending tiles - but only up to our limit
     let mut pending = osm_data.pending_tiles.lock();
-    let pending_tiles: Vec<_> = pending.drain(..).collect();
+    
+    // Skip if no pending tiles
+    if pending.is_empty() {
+        return;
+    }
+    
+    // Take only a subset of tiles to process this frame
+    let tiles_to_process = pending.len().min(MAX_TILES_PER_FRAME);
+    let pending_tiles: Vec<_> = pending.drain(0..tiles_to_process).collect();
     drop(pending);
 
     // Get current time for tile usage tracking
@@ -597,42 +624,64 @@ pub fn apply_pending_tiles(
 // This system updates which tiles are visible and marks the last time they were seen
 pub fn update_visible_tiles(
     mut tile_query: Query<(&mut TileCoords, &Transform, Entity)>,
-    camera_query: Query<&Transform, With<Camera3d>>,
+    camera_query: Query<(&Transform, &Camera), With<Camera3d>>,
     time: Res<Time>,
     mut commands: Commands,
 ) {
-    if let Ok(camera_transform) = camera_query.get_single() {
+    // Run this check at a reasonable rate (4Hz - every 250ms)
+    // Running every frame is too aggressive and causes tiles to flash
+    if (time.elapsed_secs() * 4.0).fract() > 0.1 {
+        return;
+    }
+    
+    if let Ok((camera_transform, camera)) = camera_query.get_single() {
         let current_time = time.elapsed_secs();
         
         // Get camera position and forward direction
         let camera_pos = camera_transform.translation;
         let camera_forward = camera_transform.forward();
         
-        // Create list of entities to despawn
+        // Create a vector to collect tiles to despawn
         let mut to_despawn = Vec::new();
+        
+        // Get camera parameters for proper frustum culling
+        let camera_dir = camera_forward.normalize();
+        let cam_right = camera_transform.right().normalize();
+        let cam_up = camera_transform.up().normalize();
+        
+        // Use a reasonable field of view (90 degrees)
+        let fov_factor = 0.6; // Balanced field of view factor
         
         // Update all tiles
         for (mut tile_coords, tile_transform, entity) in tile_query.iter_mut() {
             let tile_pos = tile_transform.translation;
             
-            // Calculate the vector from camera to tile center
+            // Get vector from camera to tile
             let to_tile = tile_pos - camera_pos;
             let distance = to_tile.length();
             
-            // For tiles to be visible, they should be:
-            // 1. Within a reasonable distance (based on zoom level)
-            // 2. Roughly within the camera's field of view
+            // Determine max visible distance based on zoom level
+            let zoom_factor = 1.0 + 0.5 * (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32; 
+            let max_distance = 50.0 * zoom_factor; // Balanced max distance
             
-            // Calculate max visible distance based on zoom and allow larger view area
-            let zoom_factor = 1.0 + 0.7 * (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32;
-            let max_distance = 75.0 * zoom_factor; // Increased from 50.0 to 75.0 for wider view
+            // Balanced visibility check
+            let mut is_visible = false;
             
-            // Use a wider angle check (more permissive) to avoid gaps at edges
-            let forward_dot = camera_forward.dot(to_tile.normalize());
-            
-            // Is the tile visible? More permissive check
-            // Forward dot > -0.3 means roughly within ~110 degree field of view (instead of 90)
-            let is_visible = distance < max_distance && forward_dot > -0.3;
+            if distance < max_distance {
+                let to_tile_norm = to_tile / distance;
+                
+                // Check if in front of camera with reasonable angle
+                let dot_forward = camera_dir.dot(to_tile_norm);
+                
+                if dot_forward > 0.1 { // Tiles roughly in front of camera
+                    // Check horizontal and vertical angles
+                    let dot_right = cam_right.dot(to_tile_norm).abs();
+                    let dot_up = cam_up.dot(to_tile_norm).abs();
+                    
+                    // Balanced angle check
+                    is_visible = dot_forward > fov_factor * (dot_right + dot_up);
+                }
+            }
             
             if is_visible {
                 // Update last used time if visible
@@ -641,15 +690,31 @@ pub fn update_visible_tiles(
                 // Tile is not visible
                 let time_since_used = current_time - tile_coords.last_used;
                 
-                // After 1.5 seconds of being outside view, remove non-background tiles
-                // Slightly increased from 1.0 to 1.5 to prevent rapid flickering at edges
-                if time_since_used > 1.5 && tile_coords.zoom > 6 {
+                // Use balanced timeouts based on position
+                let is_behind = camera_dir.dot(to_tile.normalize()) < 0.0;
+                
+                // Allow sufficient time before cleanup - adjust based on zoom and position
+                let timeout = if is_behind {
+                    1.0 // Behind camera - remove fairly quickly
+                } else if tile_coords.zoom <= 6 {
+                    5.0 // Background tiles - keep longer
+                } else {
+                    2.0 // Side tiles - reasonable timeout
+                };
+                
+                // Only despawn if the tile has been invisible for the timeout period
+                if time_since_used > timeout {
                     to_despawn.push(entity);
                 }
             }
         }
         
-        // Despawn entities outside view
+        // Limit despawns per frame to avoid visual stuttering
+        if to_despawn.len() > 20 {
+            to_despawn.truncate(20);
+        }
+        
+        // Despawn tiles that have been invisible for long enough
         for entity in to_despawn {
             commands.entity(entity).despawn_recursive();
         }
@@ -667,104 +732,153 @@ pub fn cleanup_old_tiles(
     // Update total time
     osm_data.total_time += time.delta_secs();
 
-    // Run cleanup more frequently - every 1 second
+    // Run cleanup at a reasonable frequency - every 1 second
     if osm_data.total_time % 1.0 > 0.05 {
         return;
     }
 
-    // How long a tile can be unused before being unloaded (in seconds)
-    // More aggressive cleanup for detailed tiles
-    const FOCUS_TILE_TIMEOUT: f32 = 3.0;      // Much shorter timeout for focus tiles
-    const BACKGROUND_TILE_TIMEOUT: f32 = 30.0; // Background tiles can stay longer
+    // Use balanced timeouts for tile cleanup
+    const FOCUS_TILE_TIMEOUT: f32 = 3.0;      // Regular tiles
+    const BACKGROUND_TILE_TIMEOUT: f32 = 10.0;  // Background tiles
     
     let current_time = time.elapsed_secs();
 
+    // Build collection for tiles to remove
     let mut focus_tiles_to_remove = Vec::new();
     let mut background_tiles_to_remove = Vec::new();
     let mut focus_indices_to_remove = Vec::new();
     let mut background_indices_to_remove = Vec::new();
 
-    // Check all tiles in the system
+    // Process ALL tiles without limit
+    let mut all_tiles = Vec::new();
     for (entity, tile_coords) in tile_query.iter() {
         let time_since_used = current_time - tile_coords.last_used;
+        all_tiles.push((entity, tile_coords, time_since_used));
+    }
+
+    // Check every tile for timeout - no sorting or limiting
+    for (entity, tile_coords, time_since_used) in &all_tiles {
         let is_background = tile_coords.zoom <= BACKGROUND_ZOOM_LEVEL;
         
-        // Apply different timeouts based on tile type
-        let timeout = if is_background { 
-            BACKGROUND_TILE_TIMEOUT 
-        } else { 
-            // Scale timeout by zoom level - higher zoom (more detailed) = shorter timeout
-            let zoom_factor = (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32 / MAX_ZOOM_LEVEL as f32;
-            FOCUS_TILE_TIMEOUT * (1.0 + zoom_factor * 5.0) // 3-15 seconds depending on zoom
+        // Determine timeout based on tile type
+        let timeout = if is_background {
+            BACKGROUND_TILE_TIMEOUT
+        } else {
+            FOCUS_TILE_TIMEOUT
         };
-
-        // Check if the timeout has been exceeded
-        if time_since_used > timeout {
+        
+        // Check if timeout exceeded - all tiles can be removed
+        if *time_since_used > timeout {
             if is_background {
-                // Check if it's a background tile
+                // Handle background tile
                 if let Some(idx) = osm_data.background_tiles.iter().position(|&(x, y, z, e)|
-                    x == tile_coords.x && y == tile_coords.y && z == tile_coords.zoom && e == entity) {
-                    background_tiles_to_remove.push(entity);
+                    x == tile_coords.x && y == tile_coords.y && z == tile_coords.zoom && e == *entity) {
+                    background_tiles_to_remove.push(*entity);
                     background_indices_to_remove.push(idx);
                 }
             } else {
-                // Check if it's a focus tile
+                // Handle focus tile
                 if let Some(idx) = osm_data.tiles.iter().position(|&(x, y, z, e)|
-                    x == tile_coords.x && y == tile_coords.y && z == tile_coords.zoom && e == entity) {
-                    focus_tiles_to_remove.push(entity);
+                    x == tile_coords.x && y == tile_coords.y && z == tile_coords.zoom && e == *entity) {
+                    focus_tiles_to_remove.push(*entity);
                     focus_indices_to_remove.push(idx);
                 }
             }
         }
     }
 
-    // Sort indices in reverse order so we can remove without changing other indices
+    // Sort indices in reverse order for removal
     focus_indices_to_remove.sort_by(|a, b| b.cmp(a));
     background_indices_to_remove.sort_by(|a, b| b.cmp(a));
 
-    // Remove focus tiles from our tracking list
+    // Remove focus tiles from tracking list
     for &idx in &focus_indices_to_remove {
         if idx < osm_data.tiles.len() {
             osm_data.tiles.remove(idx);
         }
     }
 
-    // Remove background tiles from our tracking list
+    // Remove background tiles from tracking list
     for &idx in &background_indices_to_remove {
         if idx < osm_data.background_tiles.len() {
             osm_data.background_tiles.remove(idx);
         }
     }
 
-    // Count the number of tiles to be removed
+    // Track how many we're removing
     let focus_removed = focus_tiles_to_remove.len();
     let background_removed = background_tiles_to_remove.len();
 
-    // Now despawn entities after we've updated our tracking data
-    for entity in focus_tiles_to_remove.into_iter().chain(background_tiles_to_remove) {
-        commands.entity(entity).despawn_recursive();
+    // Limit how many entities we despawn per frame to avoid stuttering
+    let max_despawn = 25;
+    let total_to_despawn = focus_tiles_to_remove.len() + background_tiles_to_remove.len();
+    
+    if total_to_despawn > max_despawn {
+        // Prioritize focus tiles
+        let max_focus = (max_despawn * 2 / 3).min(focus_tiles_to_remove.len());
+        let max_background = (max_despawn - max_focus).min(background_tiles_to_remove.len());
+        
+        focus_tiles_to_remove.truncate(max_focus);
+        background_tiles_to_remove.truncate(max_background);
     }
 
-    // Also clean up the loaded_tiles lists periodically to prevent them from growing too large
-    // Keep entries for currently loaded tiles
-    let active_focus_coords: Vec<(u32, u32, u32)> = osm_data.tiles
-        .iter()
-        .map(|&(x, y, z, _)| (x, y, z))
-        .collect();
-    
-    let active_background_coords: Vec<(u32, u32, u32)> = osm_data.background_tiles
-        .iter()
-        .map(|&(x, y, z, _)| (x, y, z))
-        .collect();
-    
-    // Remove entries from loaded_tiles that are no longer needed
-    osm_data.loaded_tiles.retain(|coords| active_focus_coords.contains(coords));
-    osm_data.loaded_background_tiles.retain(|coords| active_background_coords.contains(coords));
+    // Despawn entities marked for removal
+    for entity in focus_tiles_to_remove.into_iter().chain(background_tiles_to_remove) {
+        if commands.get_entity(entity).is_some() {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
 
-    // Log cleanup results if any tiles were removed
-    if focus_removed > 0 || background_removed > 0 {
-        debug_log!(debug_settings, "Cleaned up {} unused focus tiles and {} background tiles", 
-                  focus_removed, background_removed);
+    // Clean up loaded_tiles list periodically - every 3 seconds
+    if osm_data.total_time % 3.0 < 0.05 {
+        // Get currently valid tiles
+        let active_focus_coords: Vec<(u32, u32, u32)> = osm_data.tiles
+            .iter()
+            .map(|&(x, y, z, _)| (x, y, z))
+            .collect();
+        
+        let active_background_coords: Vec<(u32, u32, u32)> = osm_data.background_tiles
+            .iter()
+            .map(|&(x, y, z, _)| (x, y, z))
+            .collect();
+        
+        // Remove entries from loaded_tiles if not active
+        osm_data.loaded_tiles.retain(|coords| active_focus_coords.contains(coords));
+        osm_data.loaded_background_tiles.retain(|coords| active_background_coords.contains(coords));
+
+        // Log cleanup results
+        if focus_removed > 0 || background_removed > 0 {
+            debug_log!(debug_settings, "Cleaned up {} unused focus tiles and {} background tiles", 
+                focus_removed, background_removed);
+        }
+        
+        // Check for orphaned tiles every 6 seconds
+        if osm_data.total_time % 6.0 < 0.05 {
+            // Get all entity IDs from the tracking lists
+            let tracked_entities: Vec<Entity> = osm_data.tiles.iter()
+                .chain(osm_data.background_tiles.iter())
+                .map(|&(_, _, _, entity)| entity)
+                .collect();
+            
+            // Find orphaned tiles
+            let mut orphaned_tiles = Vec::new();
+            for (entity, _) in tile_query.iter() {
+                if !tracked_entities.contains(&entity) {
+                    orphaned_tiles.push(entity);
+                }
+            }
+            
+            // Despawn orphaned tiles
+            if !orphaned_tiles.is_empty() {
+                let count = orphaned_tiles.len();
+                for entity in orphaned_tiles {
+                    if commands.get_entity(entity).is_some() {
+                        commands.entity(entity).despawn_recursive();
+                    }
+                }
+                debug_log!(debug_settings, "Cleaned up {} orphaned tiles", count);
+            }
+        }
     }
 }
 

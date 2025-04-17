@@ -22,9 +22,11 @@ pub fn load_tile_from_cache(tile: &OSMTile) -> Option<DynamicImage> {
     let cache_path = tile.get_cache_path();
 
     if cache_path.exists() {
+        // PERFORMANCE: Use a simpler approach for loading with less logging
         match image::open(&cache_path) {
             Ok(img) => {
-                info!("Loaded tile {},{},{} from cache", tile.x, tile.y, tile.z);
+                // PERFORMANCE: Avoid excessive logging
+                debug!("Loaded tile {},{},{} from cache", tile.x, tile.y, tile.z);
                 return Some(img);
             },
             Err(e) => {
@@ -41,9 +43,10 @@ pub fn load_tile_from_cache(tile: &OSMTile) -> Option<DynamicImage> {
 // Save a tile to the cache
 pub fn save_tile_to_cache(tile: &OSMTile, image: &DynamicImage) {
     let cache_path = tile.get_cache_path();
-
+    
+    // PERFORMANCE: Use standard save but with debug logging instead of info
     match image.save(&cache_path) {
-        Ok(_) => info!("Saved tile {},{},{} to cache", tile.x, tile.y, tile.z),
+        Ok(_) => debug!("Saved tile {},{},{} to cache", tile.x, tile.y, tile.z),
         Err(e) => warn!("Failed to cache tile: {}", e),
     }
 }
@@ -55,33 +58,75 @@ pub async fn load_tile_image(tile: &OSMTile) -> Result<DynamicImage, anyhow::Err
     }
 
     // If not in cache, fetch from network
-    info!("Tile not in cache, fetching from network: {},{},{}", tile.x, tile.y, tile.z);
+    debug!("Tile not in cache, fetching from network: {},{},{}", tile.x, tile.y, tile.z);
 
-    // Create a client with proper user agent and timeout
+    // PERFORMANCE: Create a shared client with proper settings
+    // In a real application, this would be a global client instance
     let client = Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(5)) // Shorter timeout for better responsiveness
         .user_agent("bevy_osm_viewer/0.1.0 (github.com/user/bevy_osm_viewer)")
+        // Enable HTTP/2 for performance
+        .http2_prior_knowledge()
+        // Set connection pool limits
+        .pool_max_idle_per_host(5)
         .build()?;
 
-    let url = tile.get_url();
-    info!("Requesting OSM tile URL: {}", url);
-
-    // Attempt to load the tile with better error handling
-    let response = client.get(&url).send().await?;
-
-    if !response.status().is_success() {
-        error!("Failed to load tile {},{} - HTTP status: {}", tile.x, tile.y, response.status());
-        return Err(anyhow::anyhow!("HTTP error: {}", response.status()));
+    // Attempt to fetch the tile with retries
+    let mut last_error = None;
+    let max_retries = 2; // Original attempt + 1 retry
+    
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            debug!("Retry attempt {} for tile {},{},{}", attempt, tile.x, tile.y, tile.z);
+            // Small delay between retries to avoid overwhelming the server
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        
+        // Get URL for this attempt (could be different on retries due to subdomain rotation)
+        let url = tile.get_url();
+        debug!("Requesting OSM tile URL: {}", url);
+        
+        // Attempt to load the tile
+        match client.get(&url).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    // PERFORMANCE: Optimize memory usage by directly working with response bytes
+                    match response.bytes().await {
+                        Ok(bytes) => {
+                            debug!("Received {} bytes for tile {},{}", bytes.len(), tile.x, tile.y);
+                            
+                            match image::load_from_memory(&bytes) {
+                                Ok(image) => {
+                                    debug!("Image loaded: {}x{}", image.width(), image.height());
+                                    
+                                    // Save to cache
+                                    save_tile_to_cache(tile, &image);
+                                    
+                                    return Ok(image);
+                                },
+                                Err(e) => {
+                                    last_error = Some(anyhow::anyhow!("Failed to parse image: {}", e));
+                                    // Continue to next retry
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            last_error = Some(anyhow::anyhow!("Failed to read response bytes: {}", e));
+                            // Continue to next retry
+                        }
+                    }
+                } else {
+                    last_error = Some(anyhow::anyhow!("HTTP error: {}", response.status()));
+                    // Continue to next retry
+                }
+            },
+            Err(e) => {
+                last_error = Some(anyhow::anyhow!("Request error: {}", e));
+                // Continue to next retry
+            }
+        }
     }
-
-    let bytes = response.bytes().await?;
-    info!("Received {} bytes for tile {},{}", bytes.len(), tile.x, tile.y);
-
-    let image = image::load_from_memory(&bytes)?;
-    info!("Image loaded: {}x{}", image.width(), image.height());
-
-    // Save to cache
-    save_tile_to_cache(tile, &image);
-
-    Ok(image)
+    
+    // If we got here, all attempts failed
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to load tile after {} attempts", max_retries)))
 } 

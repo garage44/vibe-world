@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::runtime::Runtime;
 use crate::debug_log;
+use crate::tile_system::CameraTransform;
 
 /// Initialize resources for the application
 pub fn init_resources() -> (OSMData, TokioRuntime) {
@@ -84,6 +85,7 @@ pub fn setup(
         },
         Transform::from_xyz(world_x, 200.0, world_z) // Higher camera for better overview
             .looking_at(Vec3::new(world_x, 0.0, world_z), Vec3::Y),
+        CameraTransform, // Add our custom component for the tile system
     ));
 
     // Main light - directional to simulate sunlight

@@ -6,7 +6,7 @@ use crate::resources::OSMData;
 use crate::systems::tiles;
 
 /// Sets up the UI elements for the game
-pub fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub fn setup_ui(mut commands: Commands, _asset_server: Res<AssetServer>) {
     // UI camera with higher order value to ensure it renders on top
     commands.spawn((
         Camera2d,
@@ -27,7 +27,7 @@ pub fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             ..default()
         },
         // Set a background color to make text more visible
-        BackgroundColor(Color::rgba(0.0, 0.0, 0.0, 0.5)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         ZoomLevelText,
     ));
     
@@ -41,7 +41,7 @@ pub fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             ..default()
         },
         // Set a background color to make text more visible
-        BackgroundColor(Color::rgba(0.0, 0.0, 0.0, 0.5)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         TileCountText,
     ));
     
@@ -55,7 +55,7 @@ pub fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             ..default()
         },
         // Set a background color to make text more visible
-        BackgroundColor(Color::rgba(0.0, 0.0, 0.0, 0.5)),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         FpsCounterText,
     ));
 }
@@ -93,43 +93,23 @@ pub fn update_tile_count_text(
 
 /// Updates the FPS counter text
 pub fn update_fps_counter(
+    diagnostics: Res<DiagnosticsStore>,
     mut text_query: Query<&mut Text, With<FpsCounterText>>,
     time: Res<Time>,
 ) {
-    let fps = 1.0 / time.delta_secs();
+    // PERFORMANCE: Only update the FPS display a few times per second
+    // Use the time as a simple frame counter by checking the fractional part
+    if (time.elapsed_secs() * 2.0).fract() > 0.1 {
+        return; // Only update a few times per second
+    }
     
     if let Ok(mut text) = text_query.get_single_mut() {
-        text.0 = format!("FPS: {:.1}", fps);
-    }
-}
-
-/// Updates the UI text to show the current zoom level
-pub fn update_zoom_level_text_old(
-    osm_data: Res<OSMData>,
-    camera_query: Query<&Transform, With<Camera3d>>,
-    mut query: Query<&mut Text, With<ZoomLevelText>>
-) {
-    if let Ok(mut text) = query.get_single_mut() {
-        if let Ok(camera_transform) = camera_query.get_single() {
-            let current_zoom = osm_data.current_zoom;
-            let camera_height = camera_transform.translation.y;
-            
-            // Calculate the approximate real-world scale (assuming 96 DPI screen)
-            let scale = get_scale_for_zoom(current_zoom, 52.0, 96.0); // 52.0 is roughly latitude of Groningen
-            
-            // Calculate the resolution in meters per pixel at current zoom
-            let resolution = resolution_at_zoom_and_latitude(current_zoom, 52.0);
-            
-            // Update the text with the current zoom level, camera height, and real-world scale
-            text.0 = format!(
-                "Zoom Level: {} (Height: {:.1})\nScale: {} (1 pixel ≈ {:.2} m)\nMin: {}, Max: {}",
-                current_zoom,
-                camera_height,
-                scale,
-                resolution,
-                crate::resources::constants::MIN_ZOOM_LEVEL,
-                crate::resources::constants::MAX_ZOOM_LEVEL
-            );
+        // Use the FPS diagnostic from FrameTimeDiagnosticsPlugin
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
+            if let Some(value) = fps.smoothed() {
+                // Update with smoothed FPS value
+                text.0 = format!("FPS: {:.1}", value);
+            }
         }
     }
 }

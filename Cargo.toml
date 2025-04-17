@@ -5,9 +5,16 @@ edition = "2021"
 
 [dependencies]
 bevy = "0.15.3"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 tokio = { version = "1.0", features = ["full"] }
 image = "0.25"
 anyhow = "1.0"
 async-trait = "0.1"
 parking_lot = "0.12"
+futures-lite = "1.13.0"
+async-std = "1.12.0"
+crossbeam-channel = "0.5.8"
+
+[features]
+default = []
+tile_debug = []
