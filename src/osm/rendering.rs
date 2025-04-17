@@ -88,10 +88,21 @@ pub fn create_tile_mesh(
     let mesh_handle = meshes.add(mesh);
     let material_handle = material;
 
+    // Calculate y-offset based on zoom level to handle z-fighting
+    // Higher zoom levels (more detailed) should be higher up
+    // Use a small offset that won't be noticeable visually but will fix z-fighting
+    let y_offset = if is_background {
+        // Background tiles should always be below focus tiles
+        -0.01
+    } else {
+        // Higher zoom levels should be on top
+        0.005 * (tile.z as f32 / 19.0) // Normalize to a small range
+    };
+
     // Create transform
     let transform = Transform::from_xyz(
         tile.x as f32 * scale_factor,       // Scale X coordinate
-        0.0,                               // At ground level
+        y_offset,                          // Small Y offset based on zoom to prevent z-fighting
         tile.y as f32 * scale_factor        // Scale Z coordinate
     )
     .with_scale(Vec3::new(scale_factor, 1.0, scale_factor)); // Scale the tile size
@@ -172,10 +183,21 @@ pub fn create_fallback_tile_mesh(
     let mesh_handle = meshes.add(mesh);
     let material_handle = material;
 
+    // Calculate y-offset based on zoom level to handle z-fighting
+    // Higher zoom levels (more detailed) should be higher up
+    // Use a small offset that won't be noticeable visually but will fix z-fighting
+    let y_offset = if is_background {
+        // Background tiles should always be below focus tiles
+        -0.01
+    } else {
+        // Higher zoom levels should be on top
+        0.005 * (tile.z as f32 / 19.0) // Normalize to a small range
+    };
+
     // Create transform
     let transform = Transform::from_xyz(
         tile.x as f32 * scale_factor,     // Scale X coordinate
-        0.0,                             // At ground level
+        y_offset,                        // Small Y offset based on zoom to prevent z-fighting
         tile.y as f32 * scale_factor      // Scale Z coordinate
     )
     .with_scale(Vec3::new(scale_factor, 1.0, scale_factor)); // Scale the tile size

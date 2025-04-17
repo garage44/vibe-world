@@ -61,8 +61,8 @@ pub fn init_resources() -> (OSMData, TokioRuntime) {
 /// Setup the scene with initial camera, lighting, and ground plane
 pub fn setup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    _meshes: ResMut<Assets<Mesh>>,
+    _materials: ResMut<Assets<StandardMaterial>>,
     debug_settings: Res<DebugSettings>,
 ) {
     // Calculate world coordinates for Groningen location
@@ -102,16 +102,7 @@ pub fn setup(
         brightness: 0.5,
     });
 
-    // Add a ground plane for reference
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(1000.0, 1000.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.3, 0.3),
-            perceptual_roughness: 0.9,
-            ..default()
-        })),
-        Transform::from_xyz(world_x, -0.01, world_z), // Position at camera center
-    ));
+    // Ground plane removed - not needed with tile-based map
 
     // Log current position for debugging (console only)
     debug_log!(debug_settings, "Starting at world position: ({}, {})", world_x, world_z);

@@ -3,10 +3,10 @@ use crate::resources::{OSMData, TokioRuntime, DebugSettings};
 use crate::components::{TileCoords};
 use crate::osm::{OSMTile, load_tile_image, create_tile_mesh, create_fallback_tile_mesh};
 use crate::utils::coordinate_conversion::world_to_tile_coords;
-use crate::resources::constants::{max_tile_index, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL, BACKGROUND_ZOOM_LEVEL, zoom_level_from_camera_height};
+use crate::resources::constants::{max_tile_index, MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL, BACKGROUND_ZOOM_LEVEL};
 use crate::debug_log;
 
-// Process tiles based on camera position and current zoom level
+// Process tiles based on camera position and view direction
 pub fn process_tiles(
     mut osm_data: ResMut<OSMData>,
     tokio_runtime: Res<TokioRuntime>,
@@ -16,78 +16,414 @@ pub fn process_tiles(
     // Skip if we have no camera yet
     if let Ok((camera_transform, _camera)) = camera_query.get_single() {
         let camera_pos = camera_transform.translation;
-        let current_zoom = osm_data.current_zoom;
-        let background_zoom = osm_data.background_zoom;
-
-        // Process focus area tiles (higher resolution)
-        process_zoom_level_tiles(
+        let camera_forward = camera_transform.forward();
+        
+        // Calculate base zoom level from camera height - this determines the detail level
+        let base_zoom = calculate_base_zoom_level(camera_pos.y);
+        
+        // Update global zoom level for UI and other systems
+        osm_data.current_zoom = base_zoom;
+        
+        // Set a fixed lower zoom level for background (global context)
+        let background_zoom = (base_zoom.saturating_sub(4)).max(MIN_ZOOM_LEVEL).min(6);
+        osm_data.background_zoom = background_zoom;
+        
+        // Generate adaptive tiles with varying zoom levels
+        // This system uses larger tiles (lower zoom) for areas further from view center
+        generate_adaptive_tiles(
             &mut osm_data,
             &tokio_runtime,
             &debug_settings,
             camera_pos,
-            current_zoom,
-            false, // Not background tiles
+            camera_forward.into(),
+            base_zoom,
         );
+    }
+}
 
-        // Process background tiles (lower resolution)
-        process_zoom_level_tiles(
-            &mut osm_data,
-            &tokio_runtime,
-            &debug_settings,
-            camera_pos,
-            background_zoom,
+// Calculate appropriate base zoom level from camera height
+fn calculate_base_zoom_level(height: f32) -> u32 {
+    // Reduce height increments to make zoom level changes more responsive
+    match height {
+        h if h <= 1.0 => 19,   // Level 19: Local highways, crossings (1:1000 scale)
+        h if h <= 2.0 => 18,   // Level 18: Buildings, trees (1:2000 scale)
+        h if h <= 4.0 => 17,   // Level 17: Building blocks, parks, addresses
+        h if h <= 8.0 => 16,   // Level 16: Streets
+        h if h <= 15.0 => 15,  // Level 15: Small roads
+        h if h <= 30.0 => 14,  // Level 14: Detailed roads
+        h if h <= 60.0 => 13,  // Level 13: Villages, suburbs
+        h if h <= 120.0 => 12, // Level 12: Towns, city districts
+        h if h <= 250.0 => 11, // Level 11: Cities
+        h if h <= 500.0 => 10, // Level 10: Metropolitan areas
+        h if h <= 1000.0 => 9, // Level 9: Large metro areas
+        h if h <= 2000.0 => 8, // Level 8
+        h if h <= 4000.0 => 7, // Level 7: Small countries, US states
+        h if h <= 8000.0 => 6, // Level 6: Large European countries
+        h if h <= 16000.0 => 5, // Level 5: Large African countries
+        h if h <= 32000.0 => 4, // Level 4
+        h if h <= 64000.0 => 3, // Level 3: Largest countries
+        h if h <= 128000.0 => 2, // Level 2: Subcontinental areas
+        _ => 1,                  // Level 1: Whole world
+    }
+}
+
+// Generate an adaptive grid of tiles with varying zoom levels
+fn generate_adaptive_tiles(
+    osm_data: &mut OSMData,
+    tokio_runtime: &TokioRuntime,
+    debug_settings: &DebugSettings,
+    camera_pos: Vec3,
+    camera_forward: Vec3,
+    base_zoom: u32,
+) {
+    // Project camera forward onto XZ plane
+    let view_dir_xz = Vec3::new(camera_forward.x, 0.0, camera_forward.z).normalize();
+    
+    // Calculate viewing distance based on camera height and viewing angle
+    let cam_height = camera_pos.y;
+    let angle_factor = 1.0 + (1.0 - camera_forward.y.abs()) * 2.0;
+    
+    // For more horizontal views, look farther ahead
+    // For more vertical views, look closer to camera position
+    let horizontal_factor = (1.0 - camera_forward.y.abs()).powf(0.5); // Square root for smoother transition
+    let view_distance = cam_height * 1.5 * (1.0 + horizontal_factor * 3.0);
+    
+    // Calculate the exact point on the ground where the camera ray intersects
+    // This is where we want to center our high-detail tiles
+    let ground_y = 0.0; // Ground level
+    let t = if camera_forward.y != 0.0 {
+        // Parameter for ray-plane intersection: camera_pos + t * camera_forward = point on ground
+        (ground_y - camera_pos.y) / camera_forward.y
+    } else {
+        // If camera is perfectly horizontal, use a default distance
+        view_distance
+    };
+    
+    // Only use the intersection point if it's in front of the camera (t > 0)
+    // and within a reasonable distance
+    let view_target = if t > 0.0 && t < view_distance * 2.0 {
+        camera_pos + camera_forward * t
+    } else {
+        // Fallback: look ahead based on camera height
+        camera_pos + view_dir_xz * view_distance
+    };
+    
+    debug_log!(debug_settings, "View target: ({:.1}, {:.1}, {:.1}), height: {:.1}", 
+              view_target.x, view_target.y, view_target.z, cam_height);
+    
+    // All tiles to load with their coordinates and priority
+    let mut tiles_to_load = Vec::new();
+    
+    // Handle background (global context) tiles - use even lower zoom level
+    // and much fewer tiles to reduce the total load
+    let bg_zoom = (base_zoom.saturating_sub(5)).max(MIN_ZOOM_LEVEL).min(4);
+    osm_data.background_zoom = bg_zoom;
+    
+    // Get tile at camera position for background layer
+    let (bg_center_x, bg_center_y) = world_to_tile_coords(camera_pos.x, camera_pos.z, bg_zoom);
+    
+    // Add minimal set of background tiles (just enough for context)
+    let bg_range = 1; // Minimal background
+    for x_offset in -bg_range..=bg_range {
+        for y_offset in -bg_range..=bg_range {
+            let tile_x = (bg_center_x as i32 + x_offset).max(0) as u32;
+            let tile_y = (bg_center_y as i32 + y_offset).max(0) as u32;
+            
+            let priority = 1000 + x_offset.abs() + y_offset.abs(); // Lowest priority
+            tiles_to_load.push((tile_x, tile_y, bg_zoom, priority, true)); // true = background
+        }
+    }
+    
+    // Create a multi-level adaptive grid around the view target
+    // The key is to use larger tiles (lower zoom) for areas further from the view center
+    
+    // Determine the highest zoom level we'll use (based on camera height)
+    let highest_zoom = base_zoom.min(MAX_ZOOM_LEVEL);
+    
+    // OPTIMIZATION: Create much more aggressive zoom level reduction
+    // Based on camera height, dynamically calculate how many zoom levels to use
+    // and drastically reduce the number of tiles loaded
+    
+    // Dynamic zoom reduction based on camera height
+    let max_zoom_levels = if cam_height > 500.0 {
+        1 // At very high heights, just use one zoom level
+    } else if cam_height > 200.0 {
+        2 // At high heights, use two zoom levels
+    } else {
+        3 // At lower heights, use three zoom levels for more detail variation
+    };
+    
+    // Create zoom level array
+    let mut zoom_levels = Vec::with_capacity(max_zoom_levels);
+    
+    // Add highest zoom first - this is the center of view
+    zoom_levels.push(highest_zoom);
+    
+    // Add lower zoom levels as needed
+    if max_zoom_levels > 1 {
+        zoom_levels.push((highest_zoom.saturating_sub(2)).max(MIN_ZOOM_LEVEL));
+    }
+    
+    if max_zoom_levels > 2 {
+        zoom_levels.push((highest_zoom.saturating_sub(4)).max(MIN_ZOOM_LEVEL));
+    }
+    
+    // OPTIMIZATION: Keep track of covered areas to avoid loading redundant tiles
+    let mut covered_areas: Vec<(u32, u32, u32)> = Vec::new(); // (tile_x, tile_y, zoom)
+    
+    // 2. Generate tiles for each zoom level ring
+    for (ring_idx, &zoom) in zoom_levels.iter().enumerate() {
+        // Skip this ring if it's too similar to background
+        if zoom <= bg_zoom + 1 {
+            continue;
+        }
+        
+        // OPTIMIZATION: Use smaller radius for each ring
+        // Higher zoom levels (more detailed) should cover smaller areas
+        let radius = match ring_idx {
+            0 => 2, // Smallest, highest detail ring - just a small area
+            1 => 1, // Middle ring
+            _ => 1, // Outer ring
+        };
+        
+        // Calculate target center - inner rings are centered precisely at view_target
+        // Outer rings can be slightly biased towards the camera position
+        let ring_center = if ring_idx == 0 {
+            view_target // Center ring is at exact view target
+        } else {
+            // Blend between view_target and camera_pos for outer rings
+            // This creates a better distribution for angled views
+            let blend_factor = ring_idx as f32 * 0.25; // 0.25 for ring 1, 0.5 for ring 2...
+            Vec3::lerp(
+                view_target,
+                Vec3::new(camera_pos.x, 0.0, camera_pos.z), // Project camera to ground
+                blend_factor
+            )
+        };
+        
+        // Get tile coordinates for center of this ring
+        let (center_x, center_y) = world_to_tile_coords(ring_center.x, ring_center.z, zoom);
+        
+        // Max tile index for this zoom level
+        let max_index = max_tile_index(zoom);
+        
+        // Priority base for this ring - inner rings have higher priority
+        let priority_base = ring_idx as i32 * 100;
+        
+        // Add tiles in this ring
+        for x_offset in -radius as i32..=radius as i32 {
+            for y_offset in -radius as i32..=radius as i32 {
+                // Skip if we're not in this ring (for rings > 0)
+                let manhattan_dist = x_offset.abs() + y_offset.abs();
+                
+                // For outer rings, we might want to only include the perimeter tiles
+                if ring_idx > 0 && manhattan_dist < ring_idx as i32 {
+                    continue; // Skip interior tiles that are covered by inner rings
+                }
+                
+                // Calculate tile coordinates with bounds checking
+                let tile_x = (center_x as i32 + x_offset).clamp(0, max_index as i32) as u32;
+                let tile_y = (center_y as i32 + y_offset).clamp(0, max_index as i32) as u32;
+                
+                // OPTIMIZATION: Check if this area is already covered by a higher zoom level
+                // Skip this tile if it would be redundant
+                let is_covered = covered_areas.iter().any(|&(x, y, z)| 
+                    is_same_area(tile_x, tile_y, zoom, x, y, z));
+                
+                if is_covered {
+                    continue;
+                }
+                
+                // Add this tile to covered areas
+                covered_areas.push((tile_x, tile_y, zoom));
+                
+                // Calculate priority - closer to center = higher priority
+                let priority = priority_base + manhattan_dist;
+                
+                // Add to tiles to load (false = not background)
+                tiles_to_load.push((tile_x, tile_y, zoom, priority, false));
+            }
+        }
+    }
+    
+    // No need to sort by priority - deduplication step will handle proper ordering
+    
+    // Further reduce total number of tiles
+    let max_total_tiles = 40; // Hard limit on total tiles to load
+    if tiles_to_load.len() > max_total_tiles {
+        // Keep all background tiles
+        let (background_tiles, mut foreground_tiles): (Vec<_>, Vec<_>) = 
+            tiles_to_load.into_iter().partition(|&(_, _, _, _, is_bg)| is_bg);
+        
+        // Sort foreground tiles by priority
+        foreground_tiles.sort_by_key(|&(_, _, _, priority, _)| priority);
+        
+        // Keep only the highest priority foreground tiles
+        foreground_tiles.truncate(max_total_tiles - background_tiles.len());
+        
+        // Recombine
+        tiles_to_load = background_tiles;
+        tiles_to_load.extend(foreground_tiles);
+    }
+    
+    // Remove duplicate tiles (keeping highest priority/zoom version)
+    // This ensures we don't load both a large tile and its higher detail equivalents
+    dedup_tiles(&mut tiles_to_load);
+    
+    // Process foreground and background tiles separately
+    let (foreground_tiles, background_tiles): (Vec<_>, Vec<_>) = 
+        tiles_to_load.into_iter()
+                    .partition(|&(_, _, _, _, is_bg)| !is_bg);
+    
+    // Load foreground tiles
+    if !foreground_tiles.is_empty() {
+        debug_log!(debug_settings, "Loading {} foreground tiles", foreground_tiles.len());
+        
+        // Convert to the format expected by load_tiles
+        let fg_tiles: Vec<(u32, u32, u32, i32)> = foreground_tiles
+            .into_iter()
+            .map(|(x, y, z, p, _)| (x, y, z, p))
+            .collect();
+            
+        load_tiles(
+            osm_data,
+            tokio_runtime,
+            debug_settings,
+            &fg_tiles,
+            12, // Limit concurrent loads
+            false, // Not background
+        );
+    }
+    
+    // Load background tiles
+    if !background_tiles.is_empty() {
+        debug_log!(debug_settings, "Loading {} background tiles", background_tiles.len());
+        
+        // Convert to the format expected by load_tiles
+        let bg_tiles: Vec<(u32, u32, u32, i32)> = background_tiles
+            .into_iter()
+            .map(|(x, y, z, p, _)| (x, y, z, p))
+            .collect();
+            
+        load_tiles(
+            osm_data,
+            tokio_runtime,
+            debug_settings,
+            &bg_tiles,
+            4, // Limit concurrent loads
             true, // Background tiles
         );
     }
 }
 
-// Helper function to process tiles for a specific zoom level
-fn process_zoom_level_tiles(
+// Helper function to remove duplicate tiles, preferring higher zoom (detail) levels
+fn dedup_tiles(tiles: &mut Vec<(u32, u32, u32, i32, bool)>) {
+    // Sort by coordinates and background flag
+    tiles.sort_by(|a, b| {
+        // Compare background flag first (group backgrounds together)
+        a.4.cmp(&b.4)
+        // Then by coordinates
+        .then(a.0.cmp(&b.0))
+        .then(a.1.cmp(&b.1))
+        // Then by zoom level in DESCENDING order (higher zoom = more detail)
+        .then(b.2.cmp(&a.2))
+    });
+    
+    // Dedup by coordinates - this keeps the first occurrence which will be 
+    // the highest zoom level (most detailed) version
+    let mut i = 0;
+    while i < tiles.len() {
+        let mut j = i + 1;
+        while j < tiles.len() {
+            // Check if tiles refer to the same area
+            if is_same_area(tiles[i].0, tiles[i].1, tiles[i].2, 
+                           tiles[j].0, tiles[j].1, tiles[j].2) &&
+               tiles[i].4 == tiles[j].4 { // And same background status
+                // Remove the duplicate (lower zoom version)
+                tiles.remove(j);
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    
+    // Resort by priority
+    tiles.sort_by_key(|&(_, _, _, priority, _)| priority);
+}
+
+// Helper function to check if two tiles refer to the same geographic area
+// A higher zoom tile (z2) is contained within a lower zoom tile (z1) if its coordinates
+// are derived from the lower zoom tile's coordinates
+fn is_same_area(x1: u32, y1: u32, z1: u32, x2: u32, y2: u32, z2: u32) -> bool {
+    // First check if tiles are exactly the same
+    if x1 == x2 && y1 == y2 && z1 == z2 {
+        return true;
+    }
+    
+    // If zoom levels are the same but coordinates differ, they're different areas
+    if z1 == z2 {
+        return false;
+    }
+    
+    // Handle case where one tile is at a higher zoom level than the other
+    if z1 < z2 {
+        // z1 is the lower zoom (larger tile)
+        // Check if the higher zoom tile (x2,y2,z2) is contained within (x1,y1,z1)
+        let zoom_diff = z2 - z1;
+        let factor = 1 << zoom_diff; // 2^zoom_diff
+        
+        // Calculate the expected range of higher zoom tiles that would fit in the lower zoom tile
+        let min_x2 = x1 * factor;
+        let min_y2 = y1 * factor;
+        let max_x2 = min_x2 + factor - 1;
+        let max_y2 = min_y2 + factor - 1;
+        
+        // Check if the higher zoom tile is within this range
+        return x2 >= min_x2 && x2 <= max_x2 && y2 >= min_y2 && y2 <= max_y2;
+    } else {
+        // z2 is the lower zoom (larger tile) - reverse the check
+        let zoom_diff = z1 - z2;
+        let factor = 1 << zoom_diff; // 2^zoom_diff
+        
+        // Calculate the expected range of higher zoom tiles that would fit in the lower zoom tile
+        let min_x1 = x2 * factor;
+        let min_y1 = y2 * factor;
+        let max_x1 = min_x1 + factor - 1;
+        let max_y1 = min_y1 + factor - 1;
+        
+        // Check if the higher zoom tile is within this range
+        return x1 >= min_x1 && x1 <= max_x1 && y1 >= min_y1 && y1 <= max_y1;
+    }
+}
+
+// Helper function to process background tiles
+fn process_background_tiles(
     osm_data: &mut OSMData,
     tokio_runtime: &TokioRuntime,
     debug_settings: &DebugSettings,
     camera_pos: Vec3,
     zoom: u32,
-    is_background: bool,
 ) {
-    // Calculate the visible range for the current zoom level
-    // For background tiles, we need a much larger range but fewer tiles due to lower zoom
-    let visible_range = if is_background {
-        // Background tiles cover a larger area with fewer tiles
-        // At zoom level 2, each tile covers a very large area
-        match zoom {
-            0 => 1,  // At zoom 0, there's only one tile for the whole world
-            1 => 2,  // At zoom 1, we need just a few tiles
-            2 => 3,  // At zoom 2, slightly more
-            3 => 3,  // At zoom 3
-            _ => 2,  // Fallback for any other zoom level
-        }
-    } else {
-        // Focus tiles (reuse the existing visible range logic)
-        match zoom {
-            z if z >= 18 => 6,   // Very close zoom 
-            z if z >= 16 => 7,   // Close zoom
-            z if z >= 14 => 8,   // Medium-close zoom
-            z if z >= 12 => 7,   // Medium zoom
-            z if z >= 10 => 6,   // Medium-far zoom
-            z if z >= 8 => 5,    // Far zoom
-            z if z >= 5 => 4,    // Very far zoom
-            z if z >= 3 => 3,    // Extremely far zoom
-            z if z >= 1 => 2,    // Global zoom
-            _ => 1,              // Minimum zoom
-        }
+    // Calculate the visible range for background tiles
+    let visible_range = match zoom {
+        0 => 1,  // At zoom 0, there's only one tile for the whole world
+        1 => 2,  // At zoom 1, we need just a few tiles
+        2 => 3,  // At zoom 2, slightly more
+        3 => 3,  // At zoom 3
+        _ => 2,  // Fallback for any other zoom level
     };
 
-    // Tile coordinates at current zoom level
+    // Tile coordinates at zoom level
     let (tile_center_x, tile_center_y) = world_to_tile_coords(camera_pos.x, camera_pos.z, zoom);
 
-    // Generate a list of tile coordinates to load, sorted by distance from center
+    // Generate a list of tile coordinates to load
     let mut tiles_to_load: Vec<(u32, u32, u32, i32)> = Vec::new(); // (x, y, zoom, distance)
 
     // Calculate the max tile index for this zoom level
     let max_index = max_tile_index(zoom);
 
-    // Create a square grid of tiles around the center for the current zoom level
+    // Create a square grid of background tiles around the camera position
     for x_offset in -visible_range as i32..=visible_range as i32 {
         for y_offset in -visible_range as i32..=visible_range as i32 {
             // Calculate the tile coordinates with bounds checking
@@ -102,11 +438,28 @@ fn process_zoom_level_tiles(
         }
     }
 
-    // Sort tiles by distance (closest first)
+    // Sort tiles by distance
     tiles_to_load.sort_by_key(|&(_, _, _, distance)| distance);
 
-    // Set concurrent load limits
-    let max_concurrent_loads = if is_background { 8 } else { 16 };
+    load_tiles(
+        osm_data,
+        tokio_runtime,
+        debug_settings,
+        &tiles_to_load,
+        8, // Max concurrent background tile loads
+        true, // Is background
+    );
+}
+
+// Function to handle the actual tile loading logic (shared between adaptive and background systems)
+fn load_tiles(
+    osm_data: &mut OSMData,
+    tokio_runtime: &TokioRuntime,
+    debug_settings: &DebugSettings,
+    tiles_to_load: &[(u32, u32, u32, i32)], // (x, y, zoom, priority)
+    max_concurrent_loads: usize,
+    is_background: bool,
+) {
     let mut concurrent_loads = 0;
 
     // Get appropriate tracking list based on tile type
@@ -116,8 +469,8 @@ fn process_zoom_level_tiles(
         &mut osm_data.loaded_tiles
     };
 
-    // Process tiles in order of priority (closest first)
-    for (tile_x, tile_y, tile_zoom, _) in tiles_to_load {
+    // Process tiles in order of priority
+    for &(tile_x, tile_y, tile_zoom, _) in tiles_to_load {
         // Check if we've reached the maximum concurrent load limit
         if concurrent_loads >= max_concurrent_loads {
             break;
@@ -237,23 +590,60 @@ pub fn apply_pending_tiles(
 
 // This system updates which tiles are visible and marks the last time they were seen
 pub fn update_visible_tiles(
-    mut tile_query: Query<(&mut TileCoords, &Transform)>,
+    mut tile_query: Query<(&mut TileCoords, &Transform, Entity)>,
     camera_query: Query<&Transform, With<Camera3d>>,
     time: Res<Time>,
+    mut commands: Commands,
 ) {
     if let Ok(camera_transform) = camera_query.get_single() {
         let current_time = time.elapsed_secs();
         
+        // Get camera position and forward direction
+        let camera_pos = camera_transform.translation;
+        let camera_forward = camera_transform.forward();
+        
+        // Create list of entities to despawn
+        let mut to_despawn = Vec::new();
+        
         // Update all tiles
-        for (mut tile_coords, tile_transform) in tile_query.iter_mut() {
-            // Check if this tile is in camera view
-            // Simple distance check for now - could be replaced with proper frustum culling later
-            let distance = camera_transform.translation.distance(tile_transform.translation);
-
-            // If the tile is close enough to be visible, update its last_used time
-            if distance < 30.0 {
+        for (mut tile_coords, tile_transform, entity) in tile_query.iter_mut() {
+            let tile_pos = tile_transform.translation;
+            
+            // Calculate the vector from camera to tile center
+            let to_tile = tile_pos - camera_pos;
+            let distance = to_tile.length();
+            
+            // For tiles to be visible, they should be:
+            // 1. Within a reasonable distance (based on zoom level)
+            // 2. Within the camera's field of view
+            
+            // Calculate max visible distance based on zoom
+            let zoom_factor = 1.0 + 0.5 * (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32;
+            let max_distance = 50.0 * zoom_factor; // Higher zoom = smaller view distance
+            
+            // Check if in front of camera (dot product with forward vector > 0)
+            let forward_dot = camera_forward.dot(to_tile.normalize());
+            
+            // Is the tile visible?
+            let is_visible = distance < max_distance && forward_dot > 0.0;
+            
+            if is_visible {
+                // Update last used time if visible
                 tile_coords.last_used = current_time;
+            } else {
+                // Tile is not visible
+                let time_since_used = current_time - tile_coords.last_used;
+                
+                // After 1 second of being outside view, remove non-background tiles
+                if time_since_used > 1.0 && tile_coords.zoom > 6 {
+                    to_despawn.push(entity);
+                }
             }
+        }
+        
+        // Despawn entities outside view
+        for entity in to_despawn {
+            commands.entity(entity).despawn_recursive();
         }
     }
 }
@@ -269,15 +659,15 @@ pub fn cleanup_old_tiles(
     // Update total time
     osm_data.total_time += time.delta_secs();
 
-    // Only run cleanup every 5 seconds to avoid constant checking
-    if osm_data.total_time % 5.0 > 0.05 {
+    // Run cleanup more frequently - every 1 second
+    if osm_data.total_time % 1.0 > 0.05 {
         return;
     }
 
     // How long a tile can be unused before being unloaded (in seconds)
-    // Background tiles can stay longer since they cover more area
-    const FOCUS_TILE_TIMEOUT: f32 = 30.0;
-    const BACKGROUND_TILE_TIMEOUT: f32 = 60.0;
+    // More aggressive cleanup for detailed tiles
+    const FOCUS_TILE_TIMEOUT: f32 = 3.0;      // Much shorter timeout for focus tiles
+    const BACKGROUND_TILE_TIMEOUT: f32 = 30.0; // Background tiles can stay longer
     
     let current_time = time.elapsed_secs();
 
@@ -292,7 +682,13 @@ pub fn cleanup_old_tiles(
         let is_background = tile_coords.zoom <= BACKGROUND_ZOOM_LEVEL;
         
         // Apply different timeouts based on tile type
-        let timeout = if is_background { BACKGROUND_TILE_TIMEOUT } else { FOCUS_TILE_TIMEOUT };
+        let timeout = if is_background { 
+            BACKGROUND_TILE_TIMEOUT 
+        } else { 
+            // Scale timeout by zoom level - higher zoom (more detailed) = shorter timeout
+            let zoom_factor = (MAX_ZOOM_LEVEL - tile_coords.zoom) as f32 / MAX_ZOOM_LEVEL as f32;
+            FOCUS_TILE_TIMEOUT * (1.0 + zoom_factor * 5.0) // 3-15 seconds depending on zoom
+        };
 
         // Check if the timeout has been exceeded
         if time_since_used > timeout {
@@ -364,53 +760,8 @@ pub fn cleanup_old_tiles(
     }
 }
 
-// This system automatically detects and sets the zoom level based on camera height
-pub fn auto_detect_zoom_level(
-    mut osm_data: ResMut<OSMData>,
-    camera_query: Query<&Transform, With<Camera3d>>,
-    mut commands: Commands,
-    debug_settings: Res<DebugSettings>,
-) {
-    if let Ok(camera_transform) = camera_query.get_single() {
-        let camera_height = camera_transform.translation.y;
-
-        // Use the function from constants.rs that implements proper zoom level distribution
-        // based on OpenStreetMap's slippy map tilenames specifications
-        let new_zoom = zoom_level_from_camera_height(camera_height)
-            .clamp(MIN_ZOOM_LEVEL, MAX_ZOOM_LEVEL);
-
-        // Only respond to zoom changes
-        if new_zoom != osm_data.current_zoom {
-            debug_log!(debug_settings, "Zoom level changing from {} to {} (camera height: {:.2})",
-                  osm_data.current_zoom, new_zoom, camera_height);
-
-            // Update current zoom level
-            let old_zoom = osm_data.current_zoom;
-            osm_data.current_zoom = new_zoom;
-
-            debug_log!(debug_settings, "Zoom level changed from {} to {} (camera height: {:.2})",
-                  old_zoom, new_zoom, camera_height);
-
-            // Clear all focus tiles - simpler approach than trying to keep some tiles
-            let mut entities_to_remove = Vec::new();
-            
-            // Collect all focus tile entities to remove (background tiles are kept)
-            for &(_, _, _, entity) in &osm_data.tiles {
-                entities_to_remove.push(entity);
-            }
-            
-            // Clear the focus tile tracking lists
-            osm_data.tiles.clear();
-            osm_data.loaded_tiles.clear();
-            
-            // Despawn all focus tile entities at once
-            for entity in entities_to_remove {
-                if commands.get_entity(entity).is_some() {
-                    commands.entity(entity).despawn_recursive();
-                }
-            }
-            
-            debug_log!(debug_settings, "Cleared all focus tiles for zoom level change");
-        }
-    }
+// The auto_detect_zoom_level system is no longer needed as our adaptive system handles zoom levels
+// Keep this system empty as a placeholder in case other systems depend on it being registered
+pub fn auto_detect_zoom_level(_: ResMut<OSMData>, _: Query<&Transform, With<Camera3d>>, _: Commands, _: Res<DebugSettings>) {
+    // Intentionally empty - zoom level detection is now handled in process_tiles
 } 
