@@ -51,7 +51,6 @@ pub fn init_resources() -> (OSMData, TokioRuntime) {
         pending_tiles: Arc::new(Mutex::new(Vec::new())),
         current_zoom: DEFAULT_ZOOM_LEVEL,
         background_zoom: BACKGROUND_ZOOM_LEVEL,
-        height_thresholds,
         total_time: 0.0,
     };
 

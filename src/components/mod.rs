@@ -1,5 +1,3 @@
-mod tile;
-
 use bevy::prelude::*;
 
 /// Marker component for the UI text that displays the current zoom level

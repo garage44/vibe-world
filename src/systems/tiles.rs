@@ -403,60 +403,6 @@ fn is_same_area(x1: u32, y1: u32, z1: u32, x2: u32, y2: u32, z2: u32) -> bool {
     }
 }
 
-// Helper function to process background tiles
-fn process_background_tiles(
-    osm_data: &mut OSMData,
-    tokio_runtime: &TokioRuntime,
-    debug_settings: &DebugSettings,
-    camera_pos: Vec3,
-    zoom: u32,
-) {
-    // Calculate the visible range for background tiles
-    let visible_range = match zoom {
-        0 => 1,  // At zoom 0, there's only one tile for the whole world
-        1 => 2,  // At zoom 1, we need just a few tiles
-        2 => 3,  // At zoom 2, slightly more
-        3 => 3,  // At zoom 3
-        _ => 2,  // Fallback for any other zoom level
-    };
-
-    // Tile coordinates at zoom level
-    let (tile_center_x, tile_center_y) = world_to_tile_coords(camera_pos.x, camera_pos.z, zoom);
-
-    // Generate a list of tile coordinates to load
-    let mut tiles_to_load: Vec<(u32, u32, u32, i32)> = Vec::new(); // (x, y, zoom, distance)
-
-    // Calculate the max tile index for this zoom level
-    let max_index = max_tile_index(zoom);
-
-    // Create a square grid of background tiles around the camera position
-    for x_offset in -visible_range as i32..=visible_range as i32 {
-        for y_offset in -visible_range as i32..=visible_range as i32 {
-            // Calculate the tile coordinates with bounds checking
-            let tile_x = (tile_center_x as i32 + x_offset).clamp(0, max_index as i32) as u32;
-            let tile_y = (tile_center_y as i32 + y_offset).clamp(0, max_index as i32) as u32;
-            
-            // Calculate manhattan distance for priority (closest first)
-            let distance = x_offset.abs() + y_offset.abs();
-            
-            // Add to load queue with its priority
-            tiles_to_load.push((tile_x, tile_y, zoom, distance));
-        }
-    }
-
-    // Sort tiles by distance
-    tiles_to_load.sort_by_key(|&(_, _, _, distance)| distance);
-
-    load_tiles(
-        osm_data,
-        tokio_runtime,
-        debug_settings,
-        &tiles_to_load,
-        8, // Max concurrent background tile loads
-        true, // Is background
-    );
-}
-
 // Function to handle the actual tile loading logic (shared between adaptive and background systems)
 fn load_tiles(
     osm_data: &mut OSMData,

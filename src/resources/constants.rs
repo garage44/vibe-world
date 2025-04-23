@@ -19,60 +19,6 @@ pub const MAX_TILE_INDEX: u32 = (1 << MAX_ZOOM_LEVEL) - 1;
 pub const GRONINGEN_X: u32 = 4216;
 pub const GRONINGEN_Y: u32 = 2668;
 
-// Resolution of tiles at zoom level 0 (meters per pixel at equator)
-// According to OpenStreetMap wiki: 156543.03 meters/pixel at zoom 0
-pub const TILE_RESOLUTION_ZOOM_0: f32 = 156543.03;
-
-// Standard OSM tile size in pixels
-pub const TILE_SIZE_PIXELS: u32 = 256;
-
-// Exact resolutions in meters per pixel at the equator for each zoom level
-// From https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames#Resolution_and_Scale
-pub const RESOLUTIONS_METERS_PER_PIXEL: [f32; 20] = [
-    156543.03,  // Zoom 0: Whole world
-    78271.52,   // Zoom 1
-    39135.76,   // Zoom 2: Subcontinental area
-    19567.88,   // Zoom 3: Largest country
-    9783.94,    // Zoom 4
-    4891.97,    // Zoom 5: Large African country
-    2445.98,    // Zoom 6: Large European country
-    1222.99,    // Zoom 7: Small country, US state
-    611.50,     // Zoom 8
-    305.75,     // Zoom 9: Wide area, large metropolitan area
-    152.87,     // Zoom 10: Metropolitan area
-    76.437,     // Zoom 11: City
-    38.219,     // Zoom 12: Town or city district
-    19.109,     // Zoom 13: Village or suburb
-    9.5546,     // Zoom 14
-    4.7773,     // Zoom 15: Small road
-    2.3887,     // Zoom 16: Street
-    1.1943,     // Zoom 17: Block, park, addresses
-    0.5972,     // Zoom 18: Buildings, trees
-    0.2986,     // Zoom 19: Local highway and crossing details
-];
-
-// Calculate resolution (meters per pixel) at a specific zoom level and latitude
-pub fn resolution_at_zoom_and_latitude(zoom: u32, latitude_degrees: f32) -> f32 {
-    if zoom as usize >= RESOLUTIONS_METERS_PER_PIXEL.len() {
-        // Fallback calculation for zoom levels beyond our table
-        let latitude_radians = latitude_degrees.to_radians();
-        let latitude_factor = latitude_radians.cos();
-        TILE_RESOLUTION_ZOOM_0 * latitude_factor / (1 << zoom) as f32
-    } else {
-        // Use the exact values from our table, adjusted for latitude
-        let latitude_radians = latitude_degrees.to_radians();
-        let latitude_factor = latitude_radians.cos();
-        RESOLUTIONS_METERS_PER_PIXEL[zoom as usize] * latitude_factor
-    }
-}
-
-// Calculate map scale at a specific zoom level, latitude, and screen DPI
-pub fn map_scale_at_zoom(zoom: u32, latitude_degrees: f32, screen_dpi: f32) -> f32 {
-    let resolution = resolution_at_zoom_and_latitude(zoom, latitude_degrees);
-    let meters_per_inch = 0.0254; // 1 inch = 0.0254 meters
-    resolution / (screen_dpi * meters_per_inch)
-}
-
 // Determines the appropriate zoom level based on camera height
 // Uses OSM zoom level standards from https://wiki.openstreetmap.org/wiki/Zoom_levels
 pub fn zoom_level_from_camera_height(height: f32) -> u32 {
@@ -99,27 +45,6 @@ pub fn zoom_level_from_camera_height(height: f32) -> u32 {
         h if h <= 200000.0 => 2, // Level 2: Subcontinental areas (1:150 million scale)
         _ => 1,                  // Level 1: Whole world (1:250 million scale)
     }
-}
-
-// Calculate approximate real-world scale for a given zoom level at a specific latitude
-// Returns a string like "1:10000" representing the map scale
-pub fn get_scale_for_zoom(zoom: u32, latitude_degrees: f32, screen_dpi: f32) -> String {
-    let scale = map_scale_at_zoom(zoom, latitude_degrees, screen_dpi);
-    
-    // Round to a more readable number
-    let rounded_scale = if scale > 1_000_000.0 {
-        (scale / 1_000_000.0).round() * 1_000_000.0
-    } else if scale > 100_000.0 {
-        (scale / 100_000.0).round() * 100_000.0
-    } else if scale > 10_000.0 {
-        (scale / 10_000.0).round() * 10_000.0
-    } else if scale > 1_000.0 {
-        (scale / 1_000.0).round() * 1_000.0
-    } else {
-        scale.round()
-    };
-    
-    format!("1:{}", rounded_scale as u32)
 }
 
 // Color for highlighting persistent islands - might be used in future

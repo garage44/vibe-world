@@ -11,6 +11,5 @@ pub struct OSMData {
     pub pending_tiles: Arc<Mutex<Vec<(u32, u32, u32, Option<image::DynamicImage>, bool)>>>, // (x, y, zoom, image, is_background)
     pub current_zoom: u32,
     pub background_zoom: u32, // Zoom level for background tiles
-    pub height_thresholds: Vec<(f32, u32)>, // (min_height, zoom_level)
     pub total_time: f32, // Track total time for garbage collection
 } 
